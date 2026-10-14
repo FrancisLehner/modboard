@@ -73,4 +73,11 @@ pulled, harvested and read. Subsequent runs reuse the stored token.
 Contributions are welcome. Open an issue or send a pull request.
 
 What is planned and what is in progress is tracked on the
-[kanban board](https://github.com/users/fynnfischer/projects/3), other ideas are welcome. 
+[kanban board](https://github.com/users/fynnfischer/projects/3), other ideas are welcome.
+
+## Demo
+
+<p align="center">
+  <img src="assets/demo-overview.png" width="49%" alt="Overview: deadlines across all courses, grouped by urgency">
+  <img src="assets/demo-course.png" width="49%" alt="Course view: assignments, exams, and how the final grade is built">
+</p>
