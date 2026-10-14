@@ -67,3 +67,10 @@ pulled, harvested and read. Subsequent runs reuse the stored token.
 - A sync rebuilds the database and `corpus/` from scratch.
 - Model passes cost tokens — see `SCREEN_MODEL` and `EXTRACT_MODEL` in
   `src/config.py`.
+
+## Contributing
+
+Contributions are welcome. Open an issue or send a pull request.
+
+What is planned and what is in progress is tracked on the
+[kanban board](https://github.com/users/fynnfischer/projects/3), other ideas are welcome. 
