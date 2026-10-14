@@ -6,6 +6,8 @@
 
 <p align="center">Currently supports <code>moodle.zhaw.ch</code></p>
 
+<p align="center"><a href="https://fynnfischer.github.io/modboard/">Documentation</a></p>
+
 ## What it is
 A read only application that pulls data from all starred moodle courses and extracts assignements, on site lectures and final grade info so that you have all the important info in one place. 
 
