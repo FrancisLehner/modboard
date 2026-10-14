@@ -1,0 +1,319 @@
+---
+title: "Extraction pipeline"
+subtitle: "Fields first, then documents --- and the documents may only add"
+---
+
+Extraction happens in two steps with a hard boundary between them.
+
+**Step 1 --- relational.** Typed endpoints map into the document shape. Every
+value is authoritative and every gap is explicit (`None`).
+
+**Step 2 --- model.** A cheap model screens the harvested documents, a strong one
+reads the survivors, and the result is merged *additively*: a field that already
+holds a value is never written, whatever the model says.
+
+The boundary is the design. If step 2 returned a rewritten document, finding out
+what it changed would mean diffing and trusting the diff. Returning only
+*additions* makes "nothing existing was changed" true by construction --- no code
+path in `merge.py` writes to a field that holds a value.
+
+```{mermaid}
+flowchart TB
+  subgraph s1["Step 1 · Relational"]
+    direction LR
+    A["session.py<br/>typed pulls"] --> B["activities.py<br/>per-type records"]
+    B --> C["document.py<br/>one doc per course"]
+  end
+  subgraph s2["Step 2 · Model"]
+    direction LR
+    D["documents.py<br/>corpus → content blocks"] --> E["screen.py<br/>Pass 1 · relevant?"]
+    E -->|"relevant only"| F["extract.py<br/>Pass 2 · proposal"]
+    F --> G["merge.py<br/>additive merge"]
+  end
+  C --> H[("moodle.sqlite")]
+  H -->|"record as input"| F
+  G --> H
+
+  classDef llm fill:#eef3fb,stroke:#7fa8d8
+  class E,F llm
+```
+
+Note the loop: the step-1 document is *input* to pass 2. The model is shown what
+is already known so it can be told to propose only where it sees `null`.
+
+# Step 1 --- relational
+
+`CourseDocumentBuilder.build_all()` makes one call per *source*, not per course
+--- the `*_by_courses` endpoints accept a course list --- then slices the results
+per course.
+
+```python
+quizzes     = session.quizzes(ids, include_empty=False)
+assignments = session.assignments(ids, include_empty=False)
+workshops   = session.workshops(ids, include_empty=False)
+lessons     = session.lessons(ids, include_empty=False)
+quiz_state   = {q["instance"]: q for q in session.quiz_status(quizzes)}
+assign_state = {a["instance"]: a for a in session.assignment_status(assignments)}
+```
+
+Each type then goes through its own mapper (`_quiz`, `_assignment`, `_workshop`,
+`_lesson`) which joins the activity record with the user's state for it.
+
+Two conventions hold across the whole document:
+
+**Dates are stored twice.** `due_at` (unix) is the source of truth and the only
+field that may be sorted or compared. `due_date` / `due_time` are pre-rendered
+in `Europe/Zurich` so consumers never format on the fly. Every type is
+normalised to `due_at` regardless of what Moodle calls it --- a workshop's
+submission end, a lesson's deadline, a quiz's close time.
+
+**`None` and `[]` differ.** `[]` means fetched and genuinely none; `None` means
+never attempted. This is what makes the gaps in the document legible rather than
+ambiguous, and `None` is precisely what step 2 is allowed to fill.
+
+Derived fields are kept minimal and explicit:
+
+```python
+# A quiz with no maximum grade cannot count toward the module mark.
+"is_graded": None if grade_max is None else grade_max > 0,
+```
+
+The fields step 1 *cannot* answer, which is the entire reason step 2 exists:
+
+| Field | Why |
+|---|---|
+| `general.credits` | No Moodle endpoint exposes ECTS |
+| `grading[]` | Weights live in syllabus PDFs |
+| `mandatory_onsite[]` | Attendance rules live in prose |
+| `grade_achieved` (non-quiz) | Needs the gradebook; not pulled |
+
+# Step 2 --- the model passes
+
+## Preparing documents
+
+`extraction/documents.py` turns each corpus file into Messages-API content
+blocks, or records why it cannot. Three readable shapes:
+
+| Medium | Source | Block type |
+|---|---|---|
+| `text` | HTML stripped to visible words, plus `.md`/`.txt`/`.csv`/`.ipynb`/code | `text` |
+| `image` | PNG/JPEG/GIF/WebP, base64 | `image` |
+| `pdf` | The PDF's own bytes | `document` |
+
+A PDF takes the **text** route when it has a real text layer, and the far more
+expensive **pdf** route only when extraction yields under
+`MIN_CHARS_PER_PAGE` (100) characters per page --- the signal of a scan. Scanned
+PDFs are capped at `MAX_SCANNED_PAGES` (20), since each page costs image tokens.
+
+Unreadable files are returned *with a reason*, never dropped:
+
+| Reason | Meaning |
+|---|---|
+| `inert format (.css)` | Cannot carry course information → verdict `False`, free |
+| `needs conversion (.docx)` | Could carry it, cannot be opened yet → verdict `None` |
+| `unhandled format (…)` | Unknown extension → verdict `None` |
+| `no extractable text` | Opened, empty |
+
+A format nothing can parse is a **gap in coverage**, and a gap no one can see is
+worse than one that is recorded. This is why `relevant` is tri-state.
+
+## Pass 1 --- screening
+
+One cheap call per document answering one question: does this say anything about
+how the course is *run*?
+
+```{mermaid}
+flowchart LR
+  A["corpus<br/>243 documents"] --> B{"readable?"}
+  B -->|"inert format"| C["False<br/><i>free, no call</i>"]
+  B -->|"cannot parse"| D["None<br/><i>free, no call</i>"]
+  B -->|yes| E["claude-haiku-4-5<br/>8 workers"]
+  E --> F["True · 32"]
+  E --> G["False · 209"]
+  F --> H["pass 2 reads these"]
+```
+
+- **Model** `claude-haiku-4-5`, `SCREEN_WORKERS = 8`, structured output against
+  `VERDICT_SCHEMA`.
+- **Categories** `grading`, `course_structure`, `assignments`, `quizzes`,
+  `final_exam`. A document matching none is dropped.
+- **Output** `relevant` (tri-state), `categories[]`, `reason`, `evidence` --- a
+  verbatim quote --- plus `decided_by` (`model` / `format-rule` / `unreadable` /
+  `skipped` / `error`).
+
+The prompt's instruction that does the most work is the distinction between
+material a course is *about* and material about how it is *run*: lecture slides
+explaining gradient descent are `False`; an untitled screenshot showing a
+week-by-week table with point values is `True`. It also says to judge content
+over filename, and to answer `True` when in doubt --- pass 2 filters again, and a
+missed grading rule cannot be recovered.
+
+**Early abort.** A screen is hundreds of requests, so a 400 matching
+`FATAL_ERROR_MARKERS` (exhausted balance, invalid key, auth or permission error)
+sets a `threading.Event` that stops the remaining work. Discovering an empty
+balance on request 1 and stopping is the difference between one error and
+hundreds.
+
+`estimate()` counts the input tokens a full run would send via
+`messages.count_tokens`, without sending it.
+
+Real run: **243 documents → 211 model calls**, 30 decided on format alone, 2
+unreadable, **32 relevant**. 1.07 M input / 15 K output tokens in 62 s.
+
+## Pass 2 --- extraction
+
+One call per course. Input: the step-1 record, then every document pass 1 kept.
+
+```{mermaid}
+flowchart TB
+  A["course record<br/><i>from SQLite</i>"] --> C["one message"]
+  B["relevant documents<br/><i>re-read from corpus</i>"] --> C
+  C --> D["claude-sonnet-5-5<br/>effort high · 3 workers<br/>json_schema output"]
+  D --> E["proposal"]
+  E --> F["credits"]
+  E --> G["grading[]"]
+  E --> H["mandatory_onsite[]"]
+  E --> I["new_activities[]"]
+  E --> J["enrichments[]"]
+  E --> K["notes"]
+  F & G & H & I & J --> L["merge_additive()"]
+```
+
+The record goes **first** in the message, so the model knows what is already
+answered before it reads anything:
+
+> Here is the record built from Moodle's API so far. Every value in it is
+> authoritative --- propose a value only where you see null, and never propose a
+> different value for a field that has one.
+
+### What a proposal may contain
+
+| Key | Target | Rule |
+|---|---|---|
+| `credits` | `general.credits` | Only if currently `null` |
+| `grading[]` | `grading[]` | Name, `weight_percent`, `type`, `description` |
+| `mandatory_onsite[]` | `mandatory_onsite[]` | `date` (`YYYY-MM-DD`), `time`, name, description |
+| `new_activities[]` | `quizzes`/`assignments`/`workshops`/`lessons` | Assessments described in prose but absent from the record |
+| `enrichments[]` | An existing activity, by `cmid` | Only `ENRICHABLE_FIELDS`, only where `null` |
+| `notes` | the report | Contradictions and rules that fit no field |
+
+`grading[].type` is a closed enum: `exam`, `assignment`, `quiz`, `project`,
+`presentation`, `participation`, `other`.
+
+**Every entry carries provenance** --- `source` (the document path as given in
+its header), `confidence` (`high`/`medium`/`low`), and `quote`, a verbatim
+excerpt. The prompt is blunt about it: *a proposal you cannot quote for does not
+belong in the answer*. Provenance is what makes a weight checkable without
+re-reading the PDF, and the frontend surfaces anything below `high` as a
+"check this" badge.
+
+### Budget and ordering
+
+`EXTRACT_MAX_INPUT_CHARS = 600_000` per course. When documents exceed it, the
+order decides what survives:
+
+```python
+found.sort(key=lambda d: (d.origin != "text", d.chars))
+```
+
+Prose before files, smallest first --- so a short page stating the rules is never
+what the budget cuts. Anything dropped is reported in `documents_skipped` with
+its reason, not silently lost.
+
+### Request shape
+
+- `max_tokens = 32_000`, `effort = "high"`, `format = json_schema`.
+- **Streamed**, because `max_tokens` that high risks an HTTP timeout on a
+  non-streaming request.
+- The system prompt is marked `cache_control: ephemeral`. It is the only stable
+  prefix --- the documents that follow differ per course.
+- Server-side fallbacks are attempted (`betas=[…]`, `fallbacks="default"`) so a
+  declined request is answered by another model in the same call; a 400 naming
+  the parameter downgrades to a plain call for the rest of the run.
+- `stop_reason == "refusal"` and `== "max_tokens"` are raised as distinct errors
+  --- a truncated answer must not be parsed as a complete one.
+
+## The merge
+
+`merge_additive()` is pure: document + proposal → new document + report. The
+input is never mutated, and every proposal appears in the report exactly once,
+applied or rejected with a reason.
+
+```{mermaid}
+flowchart TD
+  A["proposal entry"] --> B{"confidence ≥<br/>min_confidence?"}
+  B -->|no| R["rejected"]
+  B -->|yes| C{"target field<br/>currently null?"}
+  C -->|"no — API set it"| R2["rejected<br/><b>conflict: true</b>"]
+  C -->|yes| D{"coerces to<br/>expected type?"}
+  D -->|no| R3["rejected"]
+  D -->|yes| E["applied"]
+```
+
+Five arms, one per target:
+
+| Arm | Identity / gate |
+|---|---|
+| `_merge_credits` | `general.credits is None` |
+| `_merge_list` (grading) | normalised `name` |
+| `_merge_list` (onsite) | `(date, normalised name)` |
+| `_merge_new_activities` | name not already in that array |
+| `_merge_enrichments` | `cmid` exists **and** field is enrichable **and** value is `None` |
+
+Guarantees, enforced in code rather than in the prompt:
+
+- A field holding a value is never written. The attempt is recorded with both
+  values and flagged `conflict: true` --- a document disagreeing with the API is
+  a finding worth surfacing, not something to resolve silently.
+- New entries are **appended**, never substituted, and carry
+  `origin: "extracted"` with no `cmid`. Consumers can always tell which rows the
+  API asserted.
+- Enriched fields record their own provenance under `extracted_fields`, so
+  per-field origin survives on an otherwise API-sourced activity.
+- Nothing is removed. There is no code path that deletes.
+- `_coerce` returns `None` to reject a badly typed value: a wrong-typed field is
+  worse than a missing one, since consumers rely on the stored format without
+  re-parsing.
+
+A second run proposes the same additions and the merge rejects them all as
+already present --- the pass is idempotent.
+
+Real run: **31 additions applied, 0 rejected, 0 conflicts** across 5 courses,
+105 K input / 9.6 K output tokens in 37 s.
+
+## Configuration
+
+Everything tunable is in `src/config.py`:
+
+| Setting | Value | Effect |
+|---|---|---|
+| `SCREEN_MODEL` | `claude-haiku-4-5` | Pass 1 |
+| `EXTRACT_MODEL` | `claude-sonnet-5-5` | Pass 2 |
+| `SCREEN_WORKERS` / `EXTRACT_WORKERS` | 8 / 3 | Concurrency |
+| `EXTRACT_EFFORT` | `high` | Reasoning budget |
+| `EXTRACT_MIN_CONFIDENCE` | `low` | Below this: reported, not merged |
+| `MAX_TEXT_CHARS` | 60 000 | Per-document text cap (truncation recorded) |
+| `EXTRACT_MAX_INPUT_CHARS` | 600 000 | Per-course input budget |
+| `SCREEN_MAX_TOKENS` / `EXTRACT_MAX_TOKENS` | 1 024 / 32 000 | Output caps |
+
+The API key resolves in order: `ANTHROPIC_API_KEY` in the environment, then
+`.env` (gitignored), then the OS keyring under `anthropic-api-key`.
+`resolve_api_key()` returning `None` is not a failure --- it hands resolution back
+to the SDK's own chain.
+
+## Known limits
+
+- **No link between a grading component and the activities that satisfy it.**
+  `grading[]` and `assignments[]` are parallel lists with nothing joining them.
+  A component says "Labs, 30%" and the course has four lab hand-ins, but nothing
+  records that those four *are* the Labs component. Any UI showing progress
+  toward a grade needs this join.
+- **Per-item weights are not modelled.** "4 labs, 5% each" survives only as
+  `description` prose.
+- **No pass criteria field.** "Weighted grade ≥ 4.0 and the exam ≥ 3.5" has
+  nowhere to go in `PROPOSAL_SCHEMA`; it lands in a `grading[].description` or
+  in `notes`.
+- **Workshops and lessons have no user state.** `is_outstanding`,
+  `is_graded_already` and `grade_achieved` are hardcoded `None` in
+  `document.py`, so those activities cannot be placed in an open / submitted /
+  graded bucket.

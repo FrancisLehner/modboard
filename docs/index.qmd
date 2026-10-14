@@ -1,0 +1,156 @@
+---
+title: ""
+toc: false
+page-layout: full
+---
+
+::: {.hero}
+# Modboard
+
+[One page for every deadline, file and rule across your courses.]{.tagline}
+
+---
+
+[Login](login.qmd){.btn .btn-outline-secondary .btn-sm}
+[Data sources](data-sources.qmd){.btn .btn-outline-secondary .btn-sm}
+[Extraction](extraction.qmd){.btn .btn-outline-secondary .btn-sm}
+[Database](database.qmd){.btn .btn-outline-secondary .btn-sm}
+[Logging](logging.qmd){.btn .btn-outline-secondary .btn-sm}
+:::
+
+## What this is
+
+A read-only client for one Moodle site. It pulls everything a course holds ---
+deadlines, submission state, grades, files, and the rules buried in PDFs and
+HTML pages --- and reduces it to **one JSON document per course** in SQLite.
+
+The problem it solves: Moodle's API answers what a course keeps in *fields*.
+How a module is graded, which sessions require physical attendance, and what
+the final exam covers are almost never fields. They are sentences in a
+syllabus PDF, a line in a semester-plan screenshot, or a forum announcement.
+So the project has two halves: pull the fields, then read the documents with a
+model and fill the gaps the fields left.
+
+::: {.callout-note appearance="simple"}
+Built against `moodle.zhaw.ch` (SWITCH edu-ID SSO). Nothing in the code is
+ZHAW-specific beyond `DEFAULT_SITE` --- any Moodle with the mobile web service
+enabled should work.
+:::
+
+## Pipeline
+
+```{mermaid}
+flowchart LR
+  subgraph auth["1 · Auth"]
+    A["SSO in a browser<br/>→ web-service token<br/>→ OS keyring"]
+  end
+  subgraph pull["2 · Pull"]
+    B["Structured sync<br/><i>fields → JSON document</i>"]
+    C["Harvest<br/><i>prose + files → corpus/</i>"]
+  end
+  subgraph read["3 · Read (LLM)"]
+    D["Pass 1 · Screen<br/><i>which documents<br/>describe the rules?</i>"]
+    E["Pass 2 · Extract<br/><i>grading, attendance,<br/>missing activities</i>"]
+  end
+  F[("moodle.sqlite<br/>one doc per course")]
+
+  A --> B
+  A --> C
+  B --> F
+  C --> D --> E
+  E -->|"additive merge"| F
+
+  classDef llm fill:#eef3fb,stroke:#7fa8d8
+  class D,E llm
+```
+
+Stages 2 and 3 are independent of each other up to the merge: the structured
+sync never needs a model, and the model never writes a field the API already
+answered. See [Extraction](extraction.qmd) for why that boundary is enforced in
+code rather than in a prompt.
+
+## Repository layout
+
+| Path | Role |
+|---|---|
+| `src/config.py` | Every tunable value: endpoints, paths, budgets, prompts. No logic. |
+| `src/logs.py` | [Session logging](logging.qmd): one file per application start. |
+| `src/auth/` | `flow.py` --- the SSO token handshake. `tokens.py` --- keyring persistence. |
+| `src/data_retention/client.py` | REST client. Allowlists 25 read-only functions; turns Moodle's HTTP-200 errors into exceptions. |
+| `src/data_retention/session.py` | One authenticated connection. Login, token reuse, every typed pull. |
+| `src/data_retention/activities.py` | Per-module record shapes (quiz, assign, workshop, lesson) and field coercion. |
+| `src/data_retention/progress.py` | Per-user state: attempts, submissions, completion. |
+| `src/data_retention/document.py` | Builds the one-JSON-document-per-course shape from the pulled records. |
+| `src/data_retention/corpus.py` | Harvests prose and files verbatim to a corpus directory with a manifest. |
+| `src/extraction/documents.py` | Turns corpus files into model-readable content blocks, or records why not. |
+| `src/extraction/screen.py` | Pass 1: relevance verdict per document. |
+| `src/extraction/extract.py` | Pass 2: one proposal per course, with provenance. |
+| `src/extraction/merge.py` | Applies a proposal additively. Cannot overwrite. |
+| `src/storage/sqlite.py` | The table, the activities view, and the queries. |
+
+Driver scripts at the repository root (`*_test.py`) are thin CLIs over these
+modules --- useful as worked examples of the call order.
+
+## Running it
+
+```bash
+uv sync
+uv run playwright install chromium     # for the SSO capture
+
+uv run python main_test.py             # stage 2: structured sync only
+uv run python harvest_test.py          # stage 3: harvest documents
+uv run python screen_test.py           # stage 4: pass 1  (costs API tokens)
+uv run python extract_test.py          # stage 5: pass 2  (costs API tokens)
+
+uv run python pipeline_test.py          # all of the above, end to end
+uv run python pipeline_test.py --skip-llm   # stages 1-3 only, spends nothing
+```
+
+Every run **rebuilds**: the database is dropped and the corpus cleared before
+they are rewritten, so what lands on disk is what Moodle holds now rather than
+an accumulation of past runs. `--reuse` keeps both. The switch is
+`SYNC_REBUILDS_FROM_SCRATCH` in `src/config.py`.
+
+Outputs, all in the project directory and all gitignored:
+
+| Artefact | Written by |
+|---|---|
+| `moodle.sqlite` | stage 2, extended by stage 5 |
+| `course_documents.txt` | stage 2 --- the same documents, pretty-printed |
+| `corpus/<id>-<shortname>/` | stage 3 --- raw HTML and files |
+| `corpus/manifest.json` | stage 3 --- provenance for every harvested item |
+| `corpus/screening.json` | stage 4 --- one verdict per document |
+| `corpus/extraction.json` | stage 5 --- proposals, merge results, token usage |
+| `logs/modboard-<time>-<pid>.log` | every start of the app --- see [Logging](logging.qmd) |
+
+## Scale of one real run
+
+Five favourite courses on a ZHAW autumn semester:
+
+| | |
+|---|---|
+| Harvested | 37 prose items, 206 files (210 MB), 23 links, 0 warnings |
+| Screened | 243 documents → 211 model calls, 30 decided on format, 2 unreadable |
+| Relevant | 32 documents (1.07 M input tokens, 62 s at 8 workers) |
+| Extracted | 31 additions applied, 0 rejected, 0 conflicts (37 s at 3 workers) |
+
+## What is built, and what is not
+
+| Layer | Covers | State |
+|---|---|---|
+| Auth | SSO token capture, signature verification, keyring | Built |
+| Course set | Favourites, metadata, lecturers, capability flags | Built |
+| Deadlines | Quiz, assignment, workshop, lesson dates | Built |
+| Personal state | Quiz attempts and grades, assignment submissions | Built |
+| Harvest | Sections, intros, pages, labels, blocks, forums, files | Built |
+| Pass 1 / Pass 2 | Screening, extraction, additive merge | Built |
+| Gradebook | Per-activity grades outside quizzes; any grade *scale* | Not pulled |
+| Component ↔ activity link | Which activities make up a grading component | Not modelled |
+| Completion | `session.completion()` exists but is not written into the document | Wired up partially |
+
+The last three are the known gaps, and they are the ones a frontend runs into
+first. A grading component carries a weight but no list of the activities that
+satisfy it, and `grade_achieved` is populated for quizzes only --- for
+assignments, workshops and lessons `document.py` leaves it `null` with the
+comment *"needs the gradebook; not pulled yet"*. Any UI showing a current grade
+has to stop at percent-of-max per quiz.

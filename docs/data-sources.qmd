@@ -1,0 +1,238 @@
+---
+title: "Data sources"
+subtitle: "Every endpoint the project calls, what it yields, and what it costs"
+---
+
+Two channels, with different shapes and different cost models.
+
+**Structured** (`session.py` → `document.py`): typed endpoints that answer in
+fields. Batched by course list, cheap, and authoritative --- whatever comes back
+here is never overwritten later.
+
+**Unstructured** (`corpus.py`): prose and file bytes, stored verbatim. This is
+where grading rules actually live, and no endpoint can be asked for them
+directly.
+
+```{mermaid}
+flowchart LR
+  T["token"] --> S["MoodleSession"]
+  S --> C1["Course set<br/><i>favourites, metadata</i>"]
+  S --> C2["Activities<br/><i>4 module types</i>"]
+  S --> C3["Personal state<br/><i>attempts, submissions</i>"]
+  S --> C4["Prose & files<br/><i>8 endpoints + downloads</i>"]
+  C1 --> D["CourseDocumentBuilder"]
+  C2 --> D
+  C3 --> D
+  D --> DB[("moodle.sqlite")]
+  C4 --> R["CorpusWriter"]
+  R --> M[("corpus/ + manifest.json")]
+```
+
+## Course set
+
+| Function | Yields | Notes |
+|---|---|---|
+| `core_webservice_get_site_info` | `userid`, `fullname`, `sitename`, `release`, `downloadfiles` | Also the token validity check |
+| `core_course_get_enrolled_courses_by_timeline_classification` | Courses in one bucket | Called with `classification="favourites"` |
+| `core_enrol_get_users_courses` | Every enrolment | Fallback path, and the enrichment source |
+| `core_course_get_courses_by_field` | `contacts`, `overviewfiles` | The **only** source of lecturer names |
+
+Scope is deliberately **favourites only** --- the courses you starred in Moodle.
+A full enrolment list on a ZHAW account includes years of past modules; starring
+is the cheapest signal of "this semester" that needs no heuristic.
+
+`favourite_courses()` prefers the timeline endpoint (server-side filter) and
+falls back to filtering `core_enrol_get_users_courses` on `isfavourite`
+client-side. Both are covered by one `except (MoodleApiError, ValueError)` ---
+`ValueError` is the allowlist refusing, `MoodleApiError` is the site not
+exposing it, and the fallback answers either way.
+
+The two endpoints disagree on field names, which `_normalise_course` reconciles:
+
+```python
+"category": course.get("coursecategory") or course.get("categoryname") or ""
+```
+
+Capability flags (`completion_enabled`, `activity_dates_shown`) are carried
+through as tri-state. They matter because they let an empty deadline list stay
+distinguishable from a feature the course has switched off.
+
+## Activities
+
+One call per module type, each taking the whole course list.
+
+| Function | Record | Dates it carries |
+|---|---|---|
+| `mod_quiz_get_quizzes_by_courses` | `QuizRecord` | `timeopen`, `timeclose`, `timelimit` |
+| `mod_assign_get_assignments` | `AssignRecord` | `allowsubmissionsfromdate`, `duedate`, `cutoffdate` |
+| `mod_workshop_get_workshops_by_courses` | `WorkshopRecord` | 4 phase timestamps |
+| `mod_lesson_get_lessons_by_courses` | `LessonRecord` | `available`, `deadline` |
+
+Each type gets **its own record shape**. A shared one would force a lossy
+choice at pull time, since a workshop carries four phase timestamps and an
+assignment three distinct dates. What the shapes share is an identity block
+(`type`, `course_id`, `cmid`, `instance`, `name`, `url`, `visible`), so records
+of different types stay joinable.
+
+Two normalisations happen here and nowhere else:
+
+- **`0` is not a timestamp.** Moodle writes `0` into date fields it has no
+  value for. Every timestamp passes through `ActivityRecord.timestamp()`, so
+  "not set" arrives as `None` and a sort never places an unset deadline at the
+  epoch.
+- **`cmid` vs `instance`.** `cmid` is the course-module id (what a URL uses);
+  `instance` is the per-module-type id (what `mod_quiz_*` status calls want).
+  Both are kept, because confusing them is the most common way to get an empty
+  result from a correct-looking call.
+
+`mod_assign_get_assignments` nests assignments under courses while the other
+three return a flat list, so it gets its own flattening loop rather than going
+through `_records()`.
+
+::: {.callout-note appearance="simple"}
+**Blank records.** With `include_empty=True`, a course with no quizzes still
+yields one all-`None` quiz record. This keeps "asked, genuinely none" distinct
+from "never asked". `document.py` calls with `include_empty=False`, since the
+document's own `[]` already carries that meaning.
+:::
+
+## Personal state
+
+The only per-activity calls --- these do not batch, and they dominate the call
+count.
+
+| Function | Scope | Cost |
+|---|---|---|
+| `mod_quiz_get_user_attempts` | one quiz | 1 call per quiz |
+| `mod_quiz_get_user_best_grade` | one quiz | 1 call per quiz |
+| `mod_assign_get_submission_status` | one assignment | 1 call per assignment |
+| `core_completion_get_activities_completion_status` | one course | 1 call per course |
+
+`QuizStatusRecord` filters previews out of the attempt list before counting, and
+derives `is_outstanding` as *nothing finished and the window has not shut*.
+`AssignStatusRecord` reads `lastattempt.submission` for status and timestamp,
+`lastattempt.gradingstatus` for whether it has been marked, and collects
+submitted filenames from the plugin file areas.
+
+::: {.callout-important appearance="simple"}
+**`grade_achieved` is quiz-only.** `mod_quiz_get_user_best_grade` returns a
+grade; nothing equivalent is pulled for assignments, workshops or lessons, so
+`document.py` writes `None` for those with the comment *"needs the gradebook;
+not pulled yet"*. The gradebook endpoint (`gradereport_user_get_grade_items`) is
+**not** in the allowlist. Consequently no grade *scale* is known either --- only
+raw points against `grade_max`, never a 1--6 mark or a letter.
+:::
+
+`session.completion()` is implemented and allowlisted but **is not called by
+`CourseDocumentBuilder`**, so completion state never reaches the document. It
+needs `core_course_get_contents` for activity names, because the completion
+payload carries only `cmid`.
+
+## Prose and files
+
+Everything below is harvested verbatim into `corpus/`. Nothing is summarised,
+converted or interpreted --- HTML stays HTML, bytes stay bytes. Interpretation is
+[pass 1 and 2](extraction.qmd).
+
+| Function | Yields | Stored as |
+|---|---|---|
+| `core_course_get_contents` | Sections, module intros, file inventory, URL modules | `section-summary`, `module-intro` |
+| `mod_page_get_pages_by_courses` | Full page bodies | `page` |
+| `mod_label_get_labels_by_courses` | Labels (inline course text) | `label` |
+| `mod_book_get_books_by_courses` | Book intros | `book-intro` |
+| `mod_url_get_urls_by_courses` | Outbound links | `links[]` in the manifest |
+| `core_block_get_course_blocks` | Rendered sidebar blocks (`returncontents=True`) | `block` |
+| `mod_forum_get_forums_by_courses` → `..._get_forum_discussions` → `..._get_discussion_posts` | Announcements and threads | `forum` |
+| `mod_assign_get_assignments` | `introattachments` --- briefs attached to an assignment | downloaded file |
+| `mod_lesson_get_pages` → `..._get_page_data` | Files embedded in lesson pages | downloaded file |
+
+`core_course_get_contents` is the backbone: it returns both the structure and
+most of the file inventory. The `mod_*_by_courses` calls exist because the
+contents call returns a module's *name* but not always its *body*.
+
+Two sources are off or costly by default (`HARVEST_INCLUDE_*` in `config.py`):
+forums cost one call per forum plus one per discussion (on, since
+announcements frequently carry a changed deadline); lesson files cost one call
+per lesson page (off).
+
+### Deduplication
+
+Several endpoints return the same module. A label's `description` in
+`core_course_get_contents` is its `intro` in `mod_label_get_labels_by_courses`;
+a `url` module appears in both. Three keys prevent double-storing:
+
+| Key | Prevents |
+|---|---|
+| `fileurl` | Downloading the same bytes twice |
+| `(cmid, digest-of-body)` | Storing the same prose from two endpoints |
+| `(cmid, url)` | Recording the same link twice |
+
+Keyed by `cmid` rather than by text alone, so genuinely repeated boilerplate in
+two *different* modules is still recorded twice --- which is the truth about the
+course.
+
+### Download limits
+
+| Setting | Value | Why |
+|---|---|---|
+| `MAX_FILE_BYTES` | 128 MB | Refuse a single oversized file |
+| `SKIP_MIMETYPE_PREFIXES` | `video/`, `audio/` | No text to extract |
+| `DOWNLOAD_CHUNK` | 64 KB | A large file never sits in memory twice |
+| `DOWNLOAD_TIMEOUT` | 60 s | Per file, not per harvest |
+| `MAX_NAME_LENGTH` | 60 | Longest path component written |
+
+A skipped or failed file is still recorded in the manifest with a `skipped`
+reason, so coverage gaps are visible rather than silent.
+
+### Corpus layout
+
+```
+corpus/
+  manifest.json                 provenance for every item
+  screening.json                written by pass 1
+  extraction.json               written by pass 2
+  31803-ds-osi-hs26/
+    text/0001_module-intro_gedrucktes-lehrbuch-vdf.html
+    files/0008_osi-logistics-hs26-ds.pdf
+```
+
+The manifest is the index everything downstream reads. A `texts[]` entry:
+
+```json
+{
+  "kind": "module-intro",
+  "name": "Gedrucktes Lehrbuch (vdf)",
+  "stored_path": "31803-ds-osi-hs26/text/0001_module-intro_gedrucktes-lehrbuch-vdf.html",
+  "chars": 188,
+  "section": "Vorlesungsunterlagen",
+  "cmid": 2134191,
+  "instance": 185248,
+  "modname": "url",
+  "module_name": "Gedrucktes Lehrbuch (vdf)",
+  "module_url": "https://moodle.zhaw.ch/mod/url/view.php?id=2134191",
+  "availability": null
+}
+```
+
+A `files[]` entry adds `fileurl`, `mimetype`, `filesize`, `timemodified`,
+`source`, and either `stored_path` + `bytes` or a `skipped` reason.
+`stored_path` is the **stable id** for a document --- pass 1 and pass 2 both
+address documents by it.
+
+## Call cost
+
+For *n* courses, *q* quizzes and *a* assignments:
+
+| Stage | Calls |
+|---|---|
+| Structured sync | `~2` (course set) + `1` (by_field) + `4` (batched activities) + `2q` + `a` |
+| Harvest | `~6` batched + `2n` (contents, blocks) + forums (`1` per forum + `1` per discussion) + one HTTP GET per file |
+
+The real run: five courses carrying 20 quizzes and 1 assignment between them →
+roughly 50 structured calls, against a harvest of 206 downloads totalling
+210 MB. (Most activities in those courses exist only in prose, which is why the
+document ends up with more assignments than the API ever returned.)
+
+The asymmetry is the point. Deadlines are cheap and exact; the documents that
+explain what they are worth are expensive and need a model to read. That split
+is what the [extraction pipeline](extraction.qmd) is built around.

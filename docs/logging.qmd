@@ -1,0 +1,283 @@
+---
+title: "Logging"
+subtitle: "One file per application start, and the one place a failed sync explains itself"
+---
+
+Every start of the application opens a **new log file** and keeps it for the
+life of the process. The file is the full record of what the run did: the
+Moodle handshake, one line per web-service call, how many courses and documents
+each stage retrieved, every warning, and every traceback.
+
+The reason it exists is the sync. It runs in a background thread, reports to
+the loading screen as five stage labels, and nothing else — so when a stage
+said *failed* there was no record of what had happened before it. A one-line
+`detail` on a progress bar is not enough to tell an expired token from a
+rate-limited model pass from a file the download endpoint refused.
+
+::: {.callout-note appearance="simple"}
+`src/logs.py` is the whole implementation, and
+[`src/config.py`](#configuration) holds every setting. Nothing in it raises: a
+read-only or missing log directory costs the session its file and says so on
+the terminal, but never stops the application.
+:::
+
+## Where it goes
+
+```
+logs/modboard-20261014-202414-30600.log
+      ^        ^              ^
+      |        |              └── pid, so two starts in one second stay apart
+      |        └── local time the process started (LOG_TIMESTAMP_FORMAT)
+      └── LOG_FILENAME_TEMPLATE
+```
+
+`logs/` is gitignored — a log belongs to the run that produced it, not to the
+repository. `python app.py --log-dir /somewhere/else` moves it, and the startup
+banner prints the path it chose:
+
+```bash
+$ uv run python app.py
+Modboard on http://127.0.0.1:5000
+  database /Users/fynnfischer/Projects/moodle_single_page/moodle.sqlite -- 5 course(s)
+  logging to /Users/fynnfischer/Projects/moodle_single_page/logs/modboard-20261014-202414-30600.log
+```
+
+## Two destinations, different levels
+
+The handlers filter, not the loggers. The root logger sits at `DEBUG` and each
+handler decides what it keeps, because a level on the logger would cap both.
+
+| | Level | Why |
+|---|---|---|
+| The file | `DEBUG` | Everything, including one line per web-service call and per downloaded file |
+| The terminal | `WARNING` | The loading screen polls twice a second; an `INFO` terminal would bury the startup banner |
+
+So the terminal stays as quiet as it was before logging existed — the banner,
+then nothing unless something is actually wrong. Raise `LOG_FILE_LEVEL` to
+`"INFO"` to drop the per-call lines from the file; lower `LOG_CONSOLE_LEVEL` to
+`"DEBUG"` to watch a run live.
+
+Third-party loggers are pinned in `LOG_QUIET_LOGGERS`, since the root sitting
+at `DEBUG` otherwise invites all of them in:
+
+| Logger | Pinned to | Otherwise |
+|---|---|---|
+| `werkzeug` | `WARNING` | One line per request — and the loading screen polls `/api/sync` continuously |
+| `urllib3`, `httpx`, `httpcore` | `WARNING` | One line per connection, per file downloaded |
+| `keyring` | `WARNING` | Lists every credential backend on the machine on the first lookup |
+| `anthropic` | `INFO` | Retries and rate-limit waits are worth keeping |
+
+## The logger tree
+
+Every module's logger hangs off `modboard`, so one level change covers the
+application and ours stay separable from everybody else's:
+
+```python
+from ..logs import get_logger
+
+log = get_logger("harvest")        # -> modboard.harvest
+```
+
+| Logger | Records |
+|---|---|
+| `modboard.session` | The header: when, which Python, which database and site |
+| `modboard.app` | App construction, the address it serves on, the course count |
+| `modboard.http` | The two writes (`POST /api/key`, `POST /api/sync`) and 404s. Reads are not logged — they are polled |
+| `modboard.sync` | Stage start/finish/fail with durations, and the run's own summary |
+| `modboard.sync.login`, `.harvest`, `.screen`, `.extract` | What each stage's own progress messages said |
+| `modboard.moodle.auth` | Public config, launch, token signature verification |
+| `modboard.moodle.client` | One line per web-service call: function, result size, elapsed. Refusals and network errors at `ERROR` |
+| `modboard.moodle.session` | Connection route and identity, course counts, per-activity polling |
+| `modboard.documents` | Per-course activity counts as documents are built |
+| `modboard.harvest` | Per-file downloads and skips, warnings, harvest totals |
+| `modboard.corpus.reader` | Which corpus is being read, and when it was harvested |
+| `modboard.screen`, `modboard.extract` | Model, workers, per-course results, totals with token usage |
+| `modboard.storage` | Store opens, drops, document and account writes |
+| `modboard.pipeline` | Anything a default `on_message` printed (see [below](#the-on_message-bridge)) |
+
+## What one run looks like
+
+A complete sync of five favourite courses, trimmed to the milestones. This is
+real output, not an illustration:
+
+``` {.default filename="logs/modboard-20261014-202414-30600.log"}
+20:24:14 INFO     modboard.session           ====================================================================
+20:24:14 INFO     modboard.session           session started 2026-10-14T20:24:14+02:00
+20:24:14 INFO     modboard.session           python 3.12.13 on macOS-26.3-arm64-arm-64bit (pid 30600)
+20:24:14 INFO     modboard.session           db=/Users/fynnfischer/.../moodle.sqlite site=https://moodle.zhaw.ch address=http://127.0.0.1:5000 debug=False
+20:24:14 INFO     modboard.session           ====================================================================
+20:24:14 INFO     modboard.app               serving on http://127.0.0.1:5000 -- 5 course(s)
+
+20:24:52 INFO     modboard.http              POST /api/sync: started (model stages on)
+20:24:52 INFO     modboard.sync              sync started: site https://moodle.zhaw.ch, model stages on
+20:24:52 INFO     modboard.sync              stage login started
+20:24:52 DEBUG    modboard.moodle.client     core_webservice_get_site_info -> 441 functions, 12 advancedfeatures in 0.35s
+20:24:52 INFO     modboard.moodle.session    connected to 'Moodle Lernplattform der ZHAW' as fischfyn@... [user 95094] via stored token -- Moodle 5.1.8
+20:24:52 INFO     modboard.sync              stage login done in 0.4s -- Signed in as Fynn · Moodle Lernplattform der ZHAW
+
+20:24:52 INFO     modboard.sync              stage sync started
+20:24:53 INFO     modboard.moodle.session    retrieved 5 favourite course(s) via timeline: WPI AnoDet(31661), DS.PM3 HS26(31651), GStat DS 26(31680), IMLHS26(31553), DS.OSI HS26(31803)
+20:24:55 DEBUG    modboard.moodle.client     mod_quiz_get_quizzes_by_courses -> 20 quizzes in 0.55s
+20:25:00 INFO     modboard.moodle.session    polled 11 of 20 quiz(zes) for attempt state
+20:25:00 DEBUG    modboard.documents         built IMLHS26: 20 quiz(zes), 0 assignment(s), 0 workshop(s), 0 lesson(s)
+20:25:00 INFO     modboard.documents         built 5 course document(s)
+20:25:00 INFO     modboard.storage           dropped /Users/fynnfischer/.../moodle.sqlite before opening it
+20:25:00 INFO     modboard.storage           stored 5 course document(s) with 21 activity(ies)
+20:25:00 INFO     modboard.sync              stage sync done in 7.9s -- 5 courses · 21 activities
+
+20:25:00 INFO     modboard.sync              stage harvest started
+20:26:54 DEBUG    modboard.harvest           downloaded 31553-imlhs26/files/0037_anaconda-guide-100224.pdf (19545715 bytes)
+20:26:56 DEBUG    modboard.harvest           skipped v01-cut-novalytica-moodleinternal.mp4: skipped mimetype video/mp4
+20:26:57 INFO     modboard.harvest           harvest complete: 5 course(s), 38 text item(s), 213 file(s) (215.3 MB), 23 link(s), 0 warning(s)
+20:26:57 INFO     modboard.sync              stage harvest done in 117.7s -- 213 files · 38 text items
+
+20:26:57 INFO     modboard.corpus.reader     reading corpus at /Users/.../corpus: 5 course(s), harvested 2026-10-14T20:26:57
+20:27:00 INFO     modboard.screen            screening 251 document(s) with claude-haiku-4-5 on 8 worker(s): 219 need a call, 32 decided on format alone
+20:28:04 INFO     modboard.screen            screened 251 document(s) in 64.0s: 35 relevant, 214 not relevant, 2 undecided, 0 error(s); 1113399 in / 16282 out token(s)
+20:28:04 INFO     modboard.sync              stage screen done in 66.9s -- 35 relevant
+
+20:28:04 INFO     modboard.extract           extracting from 5 course(s) / 35 relevant document(s) with claude-sonnet-5-5 at high effort on 3 worker(s)
+20:28:19 INFO     modboard.extract           WPI AnoDet (31661): 5 added, 0 rejected, 4 doc(s) read
+20:28:29 INFO     modboard.extract           DS.PM3 HS26 (31651): 9 added, 0 rejected, 5 doc(s) read
+20:28:35 INFO     modboard.extract           saved 5 extended course document(s) to the store
+20:28:35 INFO     modboard.extract           extraction finished in 31.5s: 5 course(s), 30 addition(s), 0 rejected, 0 conflict(s), 0 error(s)
+20:28:35 INFO     modboard.sync              stage extract done in 31.5s -- 5 courses · 30 additions
+20:28:35 INFO     modboard.sync              sync finished in 224.9s
+```
+
+2 877 lines for that run, of which ~2 700 are the per-call and per-file `DEBUG`
+lines the summary above elides.
+
+## The `on_message` bridge
+
+Each pipeline class reports progress through an `on_message` callback so it
+need not know where its output goes. There were two callers and both were
+lossy: a script passed `print`, and the web app passed `lambda m: None` —
+throwing every progress line away precisely when nobody was watching a
+terminal.
+
+Both now go somewhere:
+
+| Caller | `on_message` | Effect |
+|---|---|---|
+| Script, notebook | `logs.echo` (the default) | Prints **and** logs, so interactive use is unchanged |
+| The background sync | `logs.message_sink("sync.harvest")` | Logs only — there is no terminal to print to |
+
+That is why the excerpt above carries lines like
+`modboard.sync.login  Using the stored token (…)`: the stage's own words, kept
+because the stage no longer talks into a void.
+
+```python
+# src/app/jobs.py
+harvester = UnstructuredHarvester(
+    session, root=DEFAULT_CORPUS_ROOT, fresh=True,
+    on_message=message_sink("sync.harvest"),
+)
+```
+
+## Crashes nobody caught
+
+`logs.configure()` installs `sys.excepthook` **and**
+`threading.excepthook`. The sync is a thread, so without the second one a
+failure outside a stage's own `try` would print to a terminal nobody reads and
+leave the log with no trace of why the run stopped. With it:
+
+``` {.default}
+20:22:13 ERROR    modboard.sync              sync aborted by an unhandled error
+Traceback (most recent call last):
+  File ".../src/app/jobs.py", line 199, in _sync
+    store = CourseStore(self.db, fresh=True)
+  File ".../src/storage/sqlite.py", line 140, in __init__
+    log.info("dropped %s before opening it", ", ".join(self.dropped))
+TypeError: sequence item 0: expected str instance, PosixPath found
+20:22:13 ERROR    modboard.sync              sync finished with an error after 12.1s: TypeError: ...
+```
+
+That really happened, on the first run after logging was added, and it is a
+fair advertisement for the feature: the stage list on screen said only
+*Fetching courses & activities — failed*.
+
+## What is never logged
+
+| Secret | Treatment |
+|---|---|
+| The Anthropic API key | Referred to, never written. `POST /api/key` logs *that* a key was stored, not the key |
+| The login passport | Never logged. `begin_login` logs the base `launch.php` URL, not the signed one that carries it |
+| The web-service token | **Masked only.** `TokenMask` renders it as `7280...1a1a (32 chars)` |
+| Request bodies | Never. `modboard.moodle.client` logs the function name and the *size* of the answer, never its contents |
+
+The masked token is the one thing to be aware of: four leading and four
+trailing characters of a 32-character token appear in the file. That is the
+project's existing display format, not a logging decision, but it means a log
+file is not something to paste into a public issue unedited.
+
+## Reading a run
+
+```bash
+# the newest session
+less "$(ls -t logs/*.log | head -1)"
+
+# the stage-level story, without the per-call noise
+grep "modboard.sync " logs/modboard-*.log
+
+# everything that went wrong
+grep -E "WARNING|ERROR|CRITICAL" logs/modboard-*.log
+
+# what the Moodle conversation cost
+grep "modboard.moodle.client" logs/modboard-*.log | wc -l
+
+# the slow calls
+grep -oE "modboard.moodle.client.*in [0-9]+\.[0-9]+s" logs/*.log | sort -t' ' -k2 -rn | head
+```
+
+## Configuration
+
+Everything is in the *Session logging* section of `src/config.py`.
+
+| Setting | Default | Role |
+|---|---|---|
+| `LOG_DIR` | `PROJECT_ROOT / "logs"` | Where session files go; `--log-dir` overrides it |
+| `LOG_ROOT_NAME` | `"modboard"` | The logger every module hangs off |
+| `LOG_FILENAME_TEMPLATE` | `"modboard-{started}-{pid}.log"` | Also the glob that finds old sessions to prune |
+| `LOG_TIMESTAMP_FORMAT` | `"%Y%m%d-%H%M%S"` | Fixed width, so name order *is* time order |
+| `LOG_FILE_LEVEL` | `"DEBUG"` | Raise to `"INFO"` to drop the per-call lines |
+| `LOG_CONSOLE_LEVEL` | `"WARNING"` | Lower to `"INFO"` to watch a run live |
+| `LOG_FORMAT`, `LOG_DATE_FORMAT` | time, level, logger, message | |
+| `LOG_KEEP_SESSIONS` | `20` | Sessions kept; `None` keeps every one |
+| `LOG_QUIET_LOGGERS` | see above | Third-party loggers and the level they are pinned to |
+
+**Retention** happens on startup, before the new file is opened: the directory
+is listed, sorted by name — which is sorted by time, because the timestamp is
+fixed width — and the oldest deleted until there is room for one more. Reading
+the directory is the whole mechanism; there is no index to keep in step, and
+nothing that does not match `LOG_FILENAME_TEMPLATE` is ever touched.
+
+## Using it outside the web app
+
+`app.py` calls `configure()` as the first thing in `main()`, so everything
+below it logs into that session's file. A script or notebook has to ask:
+
+```python
+from src import logs
+
+logs.configure(context={"note": "harvest-only run"})
+
+log = logs.get_logger("my-script")
+log.info("starting")
+```
+
+`context` becomes the header's last line — the settings that decide what the
+run will do, so a log read weeks later says what it was a log of. Calling
+`configure()` twice returns the first call's path and changes nothing, so
+importing a module that configures logging cannot split a session across two
+files.
+
+Without `configure()`, nothing breaks: `echo` still prints, `INFO` is
+discarded, and `WARNING` and above reach stderr through Python's last-resort
+handler.
+
+::: {.callout-warning appearance="simple"}
+`--debug` turns on Flask's reloader, which restarts the process — and a restart
+is a new application start, so it opens a **second** log file. It also abandons
+any sync in flight, which is why the reloader is off by default.
+:::

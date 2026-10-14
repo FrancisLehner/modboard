@@ -1,0 +1,41 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Modboard"
+  navbar:
+    background: "#1d2b3a"
+    foreground: "#e8edf3"
+    pinned: true
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: login.qmd
+        text: Login
+      - href: data-sources.qmd
+        text: Data sources
+      - href: extraction.qmd
+        text: Extraction
+      - href: database.qmd
+        text: Database
+      - href: logging.qmd
+        text: Logging
+    tools:
+      - icon: github
+        href: https://github.com/fynnfischer/modboard
+    search: true
+
+format:
+  html:
+    theme: [cosmo, theme.scss]
+    css: custom.css
+    toc: true
+    toc-depth: 2
+    toc-expand: false
+    code-copy: true
+    grid:
+      body-width: 1250px
+      margin-width: 240px
+      sidebar-width: 240px
+      gutter-width: 1.5rem

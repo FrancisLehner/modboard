@@ -1,0 +1,175 @@
+---
+title: "Login"
+subtitle: "How a web-service token is obtained, verified and stored"
+---
+
+Moodle does not hand out API tokens to arbitrary clients. The only route a
+normal account has is the one the official mobile app uses:
+`admin/tool/mobile/launch.php` issues a token after an interactive login, and
+redirects to a custom URL scheme (`moodlemobile://token=...`) that the app is
+registered to handle. `src/auth/flow.py` reimplements that handshake and
+catches the redirect in a scripted browser instead of an app.
+
+**The password is never seen by this code.** It is typed into a real browser
+window on the institution's own SSO page. The code opens the page and watches
+for the redirect.
+
+## The handshake
+
+```{mermaid}
+sequenceDiagram
+  autonumber
+  participant C as MoodleAuthenticator
+  participant M as Moodle site
+  participant B as Browser (Playwright)
+  participant U as User
+  participant K as OS keyring
+
+  C->>M: POST lib/ajax/service-nologin.php<br/>tool_mobile_get_public_config
+  M-->>C: wwwroot, launchurl, typeoflogin, forcedurlscheme
+  Note over C: passport = secrets.token_hex(16)
+  C->>B: open launch.php?service=…&passport=…&urlscheme=…
+  B->>M: GET launch.php
+  M-->>B: redirect to SSO
+  U->>B: credentials + 2FA on the SSO page
+  B->>M: authenticated callback
+  M-->>B: 302 → moodlemobile://token=<base64>
+  B-->>C: captured URL
+  Note over C: base64 → site_hash:::token:::private_token<br/>assert md5(wwwroot + passport) == site_hash
+  C->>K: store token, keyed by site URL
+```
+
+### Step 0 --- public config
+
+`fetch_public_config()` POSTs `tool_mobile_get_public_config` to
+`lib/ajax/service-nologin.php`. No authentication required. It answers four
+things that matter:
+
+| Field | Used for |
+|---|---|
+| `wwwroot` / `httpswwwroot` | The exact root string hashed into the signature |
+| `launchurl` | Where to start the handshake |
+| `typeoflogin` | `1` = in-app form (unsupported), `2`/`3` = browser login |
+| `forcedurlscheme` | A site may override `moodlemobile://` |
+
+A failure here almost always means mobile web services are disabled site-wide,
+and the error says so rather than reporting a network problem.
+
+### Step 1 --- the passport
+
+```python
+passport = secrets.token_hex(16)
+launch_url = f"{launchurl}?service=moodle_mobile_app&passport={passport}&urlscheme={scheme}"
+```
+
+The passport is the whole security property of the flow. Moodle returns the
+token alongside `md5(wwwroot + passport)`, and only a response to *our* launch
+request can carry a hash over *our* passport. That makes a token for a
+different site, a replayed old redirect, and a tampered one all detectable.
+`begin_login()` mints a fresh passport per attempt, invalidating any previous
+one.
+
+### Step 2 --- catching the redirect
+
+Browsers refuse to navigate to an unregistered URL scheme, and *how* they
+refuse differs. `BrowserTokenCapture` therefore watches three places at once
+and takes whichever fires first:
+
+1. the `Location` header of any 3xx response,
+2. `request` and `framenavigated` events for any non-http scheme carrying
+   `token=`,
+3. the `a#launchapp` fallback link Moodle renders when the redirect cannot
+   fire, polled every 500 ms.
+
+The browser context is created fresh with no `storage_state` and no user data
+directory, and is closed before the function returns --- the SSO session must
+not outlive the capture. Playwright's sync API cannot run inside a live asyncio
+loop, so the capture is dispatched to a worker thread, which is what makes it
+callable from a Jupyter notebook.
+
+If all three strategies miss (some browsers swallow the redirect behind a
+native "open app?" dialog), `complete_manual(url)` verifies a URL pasted in by
+hand. Same verification path, no browser.
+
+### Step 3 --- verification
+
+```
+base64(payload) → "<site_hash>:::<token>[:::<private_token>]"
+```
+
+The payload is base64-decoded leniently --- URL-safe alphabet, missing padding
+and double percent-encoding all occur in practice --- but with
+`validate=True`, because without it `base64` silently skips characters outside
+the alphabet and happily decodes garbage.
+
+Then `verify_and_decode` recomputes `md5(candidate + passport)` for each
+plausible spelling of the root (with and without trailing slash, since Moodle
+hashes whatever its own config holds) and compares with
+`secrets.compare_digest`. No match is a hard failure: the token is discarded,
+never stored.
+
+### Step 4 --- storage
+
+`TokenStore` writes to the OS credential store via `keyring`, keyed by site URL
+so several sites coexist:
+
+| Entry | Service name |
+|---|---|
+| Web-service token | `zhaw-moodle-token` |
+| Private token (file downloads) | `zhaw-moodle-private-token` |
+| Anthropic API key | `anthropic-api-key` |
+
+If no working backend exists, `MoodleSession` falls back to `MemoryTokenStore`
+and says so --- the token then dies with the process. Nothing is ever written to
+a file. Tokens are masked as `abcd...wxyz (40 chars)` by `TokenMask` wherever
+they are printed, including in `__repr__`, so a notebook cell cannot echo one.
+
+## Connecting
+
+`MoodleSession.connect()` is the entry point for everything downstream:
+
+```{mermaid}
+flowchart TD
+  A["connect()"] --> B{"token in keyring?"}
+  B -->|yes| C["core_webservice_get_site_info"]
+  C -->|valid| D["ready"]
+  C -->|"invalidtoken"| E["discard, fall through"]
+  B -->|no| E
+  E --> F["login(): full SSO handshake"]
+  F --> G["verify signature"]
+  G --> H["save to keyring"] --> D
+```
+
+A stored token is *validated*, not trusted: `get_site_info` is the cheapest
+call that proves a token still works, and it doubles as the identity lookup
+(`userid`, `fullname`, `sitename`, `downloadfiles`). A revoked token returns
+`invalidtoken`, which is treated as "no token" and triggers a fresh login
+rather than an error.
+
+## Read-only by construction
+
+Three independent layers, so no single mistake can produce a write:
+
+1. **The service.** `moodle_mobile_app` is what the token is scoped to.
+2. **The allowlist.** `MoodleClient` checks every `wsfunction` against
+   `DEFAULT_ALLOWED_FUNCTIONS` (25 entries, every one a `*_get_*` read) and
+   raises `ValueError` *before* a request is made. A write call cannot be expressed;
+   pass `allowed_functions=None` to disable the check deliberately.
+3. **HTTPS.** `normalise_site_url` rejects a non-HTTPS site URL and
+   `MoodleClient.__init__` refuses to send a token over one.
+
+Moodle reports application errors with HTTP 200 and an `exception`/`errorcode`
+body, so `raise_for_status()` sees nothing wrong. `_raise_for_moodle_error`
+turns those into `MoodleApiError` and attaches advice for the codes worth
+explaining (`ERROR_HINTS` in `config.py`). A non-JSON response is reported by
+status code only --- the body is never echoed, since an error page can contain
+the token.
+
+## Revoking
+
+```python
+session.logout()   # deletes both keyring entries, returns what existed
+```
+
+This clears the local credentials only. To invalidate the token server-side,
+use *Security keys* in your Moodle profile.

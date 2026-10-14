@@ -1,0 +1,35 @@
+/*-- scss:defaults --*/
+
+// Dark slate navbar over a clean white body, Ibis-style.
+$navbar-bg:   #1d2b3a;
+$navbar-fg:   #e8edf3;
+$navbar-hl:   #7fb3ff;
+
+$body-bg:     #ffffff;
+$body-color:  #1d2125;
+$link-color:  #0b4f9e;
+
+$font-family-sans-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+$h1-font-size: 2rem;
+$toc-color: #667085;
+
+/*-- scss:rules --*/
+
+.navbar { border-bottom: 1px solid rgba(255, 255, 255, .08); }
+.navbar-brand { font-weight: 600; letter-spacing: .2px; }
+
+// Hero block on the landing page.
+.hero {
+  text-align: center;
+  padding: 72px 0 8px;
+}
+.hero h1 { font-size: 2.6rem; margin: 0 0 6px; font-weight: 700; }
+.hero .tagline { color: #667085; font-size: 1.05rem; margin: 0 0 28px; }
+.hero hr { max-width: 520px; margin: 0 auto 26px; border-top: 1px solid #e3e6ea; }
+.hero .btn {
+  margin: 0 4px 8px;
+  border-color: #d3d7dd;
+  color: #1d2125;
+  font-size: .92rem;
+}
+.hero .btn:hover { background: #f1f3f5; border-color: #b9bfc7; }

@@ -1,0 +1,45 @@
+/* Tables carry most of this site's content, so give them room and rhythm. */
+
+table {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+/* Top-aligned cells: rows mix one-word and three-line cells. */
+.table > :not(caption) > * > * {
+  vertical-align: top;
+  padding: 0.6rem 0.75rem;
+}
+
+thead th {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* Function names must never be split mid-identifier. */
+td code,
+th code {
+  white-space: nowrap;
+  font-size: 0.84em;
+}
+
+/* First column holds the source/function name: let it take what it needs. */
+table td:first-child {
+  min-width: 15rem;
+}
+
+/* Zebra striping makes wide rows trackable across the page. */
+tbody tr:nth-child(odd) {
+  background-color: rgba(0, 0, 0, 0.025);
+}
+
+/* Any table still too wide scrolls inside itself rather than the page. */
+.table-responsive,
+.cell-output-display {
+  overflow-x: auto;
+}
+
+/* The TOC rail should stay a rail, not a column. */
+#quarto-margin-sidebar {
+  font-size: 0.82rem;
+}

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#141414; --ink-solid:#161616; --ink-2:#4A4A45; --muted:#6B6B66;
+  --line:#ECECE6; --line-2:#E5E5DF; --line-3:#D6D6CF; --wash:#F1F1EB; --wash-2:#FAFAF7; --track:#DAD9D1;
+  /* grading component types */
+  --t-exam:#161616; --t-project:#3F5D7A; --t-assignment:#6F7F4E; --t-quiz:#B9873A;
+  --t-presentation:#A65A3F; --t-participation:#7D72A0; --t-other:#A3A39C;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#FFFFFF;color:var(--ink);font-family:'Geist','Helvetica Neue',sans-serif;font-size:15px;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer;color:inherit}
+input{font-family:inherit}
+a{color:var(--ink)}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+
+/* ---------- shell ---------- */
+.shell{min-height:100vh;display:flex;flex-wrap:wrap}
+nav.side{flex:1 1 240px;max-width:100%;padding:40px 28px;display:flex;flex-direction:column;gap:36px;border-right:1px solid var(--line)}
+main{flex:999 1 640px;min-width:0}
+/* desktop: sidebar is pinned to the viewport, only main scrolls; profile stays at the bottom */
+@media (min-width:900px){
+  .shell{flex-wrap:nowrap}
+  /* 300px rather than the mock's 280: real course names are long enough that
+     the extra 20px is the difference between two lines and four. */
+  nav.side{flex:0 0 300px;position:sticky;top:0;height:100vh;overflow-y:auto}
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:30px;height:30px;border-radius:8px;background:var(--ink-solid);display:flex;align-items:center;justify-content:center}
+.brand-name{font-size:22px;font-weight:700;letter-spacing:-0.02em}
+.nav-btn{display:flex;align-items:center;gap:12px;padding:10px 14px;min-height:44px;border:0;border-radius:10px;background:transparent;text-align:left;width:100%}
+.nav-btn.on{background:var(--wash)}
+/* Real shortnames run to "DS.PM3 HS26" and real names to five words. The chip
+   keeps its one line and the name is cut at two, so the list stays scannable. */
+.nav-btn .chip{white-space:nowrap;flex:none}
+.nav-btn .nav-name{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.nav-btn .badge{min-width:24px;height:24px;border-radius:12px;background:var(--wash);font-size:12px;display:flex;align-items:center;justify-content:center}
+.nav-btn.on .badge{background:#fff}
+.chip{font-size:11px;font-weight:600;letter-spacing:0.04em;padding:4px 6px;border-radius:6px;border:1px solid var(--line-3);min-width:40px;text-align:center;background:#fff}
+/* Sidebar profile: a full name and a site name both run longer than 300px
+   ("ZHAW Zürcher Hochschule für Angewandte Wissenschaften"). Cut, with the
+   whole string in the tooltip. */
+.one-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- big number strip ---------- */
+.stats{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);border-top:1px solid var(--ink-solid)}
+.stat{position:relative;padding:22px 24px 4px 0;display:flex;flex-direction:column;gap:14px;border:0;background:transparent;text-align:left}
+/* divider starts below the black rule instead of touching it */
+.stat + .stat{padding-left:24px}
+.stat + .stat::before{content:'';position:absolute;left:0;top:18px;bottom:0;width:1px;background:var(--line)}
+.stat .num{font-size:clamp(44px,5.2vw,72px);font-weight:500;letter-spacing:-0.045em;line-height:0.9;white-space:nowrap}
+.stat .num small{font-size:24px;color:var(--muted);letter-spacing:-0.01em;font-weight:400}
+.stat .lbl{font-size:14px;color:var(--ink-2);line-height:1.35}
+@media (max-width:900px){.stats{grid-auto-flow:row;grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(3){padding-left:0}.stat:nth-child(3)::before{display:none}.stat .num{font-size:52px}}
+
+/* ---------- cards ---------- */
+.card{border:1px solid var(--line-2);border-radius:14px;background:#fff}
+.pill{padding:6px 10px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
+.h2{margin:0;font-size:26px;font-weight:500;letter-spacing:-0.01em}
+.sub{font-size:13px;color:var(--muted)}
+.section{padding:32px 40px 48px}
+@media (max-width:640px){.section{padding:24px 16px 40px}}
+.empty{border:1px dashed var(--line-3);border-radius:12px;padding:22px;color:var(--muted);font-size:14px;text-align:center}
+/* The description a row can unfold. The button is grey and borderless so a
+   row that has one reads as a row, not as a row with a control in it; the
+   text wraps to its own line because it is the only full-width child of a
+   wrapping flex row. */
+.desc-btn{align-self:flex-start;border:0;background:transparent;padding:2px 0;font-size:13px;color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+.desc-btn:hover{color:var(--ink-2)}
+.desc{flex:1 0 100%;margin-top:2px;padding:12px 14px;border-radius:10px;background:var(--wash);font-size:14px;line-height:1.5;color:var(--ink-2);white-space:pre-wrap}
+
+/* ---------- grade composition ---------- */
+.comp-bar{display:flex;gap:3px}
+/* Each slice is a size container, so its own width decides which of its
+   labels survive. A 5% slice is 17px wide on a narrow aside and 60px on a
+   wide one; a weight threshold in JS would be wrong at one of those. Sizing
+   the slice as a container also stops its text from widening it. */
+.comp-seg{min-width:0;overflow:hidden;display:flex;flex-direction:column;gap:5px;container-type:inline-size}
+@container (max-width:150px){.comp-seg.big .nm{display:none}}
+@container (max-width:62px){.comp-seg.big .pct{display:none}}
+@container (max-width:110px){.comp-seg.sm .nm{display:none}}
+@container (max-width:42px){.comp-seg.sm .pct{display:none}}
+.comp-block{border-radius:4px;display:flex;align-items:flex-end;justify-content:space-between;gap:6px;padding:8px 9px;color:#fff;overflow:hidden;white-space:nowrap}
+.comp-block .pct{font-weight:600;letter-spacing:-0.01em}
+.comp-block .nm{opacity:.85;overflow:hidden;text-overflow:ellipsis}
+.comp-track{height:4px;border-radius:2px;background:var(--line);overflow:hidden;display:flex}
+.comp-track .g{background:var(--ink-solid)}
+.comp-track .s{background:repeating-linear-gradient(-45deg,var(--ink-solid) 0 1.5px,#fff 1.5px 4px)}
+.type-dot{width:10px;height:10px;border-radius:3px;display:inline-block;flex:none}
+/* a component whose share of the grade no document states, and the slice of
+   the grade left over when the stated weights do not reach 100% */
+.comp-block.unknown{color:var(--ink-2);border:1px dashed var(--line-3);background:var(--wash-2)}
+.comp-block.gap{color:var(--muted);border:1px dashed var(--line-3);background:
+  repeating-linear-gradient(-45deg,var(--wash) 0 4px,#fff 4px 9px)}
+
+/* ---------- provenance ---------- */
+/* Marks a value that was read out of a document or guessed from one, rather
+   than returned by Moodle. */
+.flag{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+.tag{font-size:11px;font-weight:600;padding:3px 8px;border-radius:999px;white-space:nowrap}
+.tag.warn{background:#FDEAD7;color:#7A3E10}
+.tag.info{background:var(--wash);color:var(--ink-2)}
+.divider{width:1px;height:12px;background:var(--line-3);display:inline-block}
+
+/* ---------- attendance ---------- */
+.att-dots{display:flex;gap:4px;flex-wrap:wrap}
+.att-dot{width:18px;height:18px;border-radius:5px;border:1.5px solid var(--ink-solid)}
+.att-dot.past{background:var(--ink-solid)}
+.att-dot.next{background:#FEC84B;border-color:#B57E00}
+
+/* ---------- onboarding ---------- */
+.onb{min-height:100vh;background:var(--wash);display:flex;align-items:center;justify-content:center;padding:40px 16px}
+.onb-card{width:100%;max-width:520px;background:#fff;border-radius:20px;padding:40px;display:flex;flex-direction:column;gap:28px}
+@media (max-width:640px){.onb-card{padding:28px 20px}}
+.btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:52px;padding:0 24px;border:0;border-radius:12px;background:var(--ink-solid);color:#fff;font-size:17px}
+.btn-primary:disabled{background:#BDBDB6;cursor:not-allowed}
+.btn-ghost{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 14px;border:1px solid var(--line-3);border-radius:10px;background:#fff;font-size:15px}
+.btn-ghost:disabled{color:var(--muted);cursor:not-allowed}
+.field{display:flex;align-items:center;gap:10px;border:1px solid var(--line-3);border-radius:12px;padding:0 14px;min-height:52px}
+.field:focus-within{border-color:var(--ink-solid);box-shadow:0 0 0 3px rgba(22,22,22,.08)}
+.field input{flex:1;min-width:0;border:0;outline:none;font-size:16px;background:transparent}
+.steps{display:flex;gap:6px}
+.steps span{height:4px;flex:1;border-radius:2px;background:var(--line)}
+.steps span.on{background:var(--ink-solid)}
+.job-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid var(--line)}
+.job-ic{width:26px;height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 0.9s linear infinite}
+.alert{padding:14px 16px;border-radius:10px;background:#FEF3F2;border:1px solid #FDA29B;color:#7A1B12;font-size:14px;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

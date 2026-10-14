@@ -1,0 +1,342 @@
+---
+title: "Database"
+subtitle: "One JSON document per course, a single-row account, and a view that makes dates queryable"
+---
+
+The store is deliberately small: **one table for the data**, with one row per
+course holding the whole course as JSON. The document is the only source of
+truth. Dated items are *queried out* of the JSON with `json_each` rather than
+duplicated into a second table, so there is no synchronisation problem between
+a document and its index.
+
+A second table, `account`, holds exactly one row: the person the last login
+signed in as, and the Moodle it signed in to. It is separate because it is the
+one fact the course documents cannot carry --- they are keyed by course, and
+the person is not a property of a course.
+
+## Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS course_document (
+    course_id      INTEGER PRIMARY KEY,
+    schema_version INTEGER NOT NULL,
+    fetched_at     INTEGER NOT NULL,
+    last_seen_at   INTEGER NOT NULL,
+    doc            TEXT    NOT NULL,
+    shortname TEXT GENERATED ALWAYS AS (json_extract(doc, '$.general.shortname')) STORED,
+    fullname  TEXT GENERATED ALWAYS AS (json_extract(doc, '$.general.name'))      STORED
+);
+```
+
+| Column | Role |
+|---|---|
+| `course_id` | Moodle's own id, so a row is addressable without a lookup |
+| `schema_version` | `DOCUMENT_SCHEMA_VERSION`; bumped when the shape changes |
+| `fetched_at` | When this course's data was pulled |
+| `last_seen_at` | When this course last appeared in a sync |
+| `doc` | The whole course as JSON |
+| `shortname`, `fullname` | Generated, stored columns --- listing courses needs no JSON parse |
+
+`fetched_at` and `last_seen_at` differ on purpose. Within a sync, writing is an
+upsert and never a delete, so a course that stops appearing keeps its old
+`last_seen_at` --- which distinguishes an unenrolment from a failed fetch.
+
+::: {.callout-note appearance="simple"}
+**Rebuild semantics.** That distinction is currently moot, because a sync drops
+the database first: `CourseStore(path, fresh=True)` calls `drop_database()`,
+which removes the file *and* its `-wal`/`-shm` sidecars (deleting the database
+alone would leave a WAL that SQLite replays into the new file). `fresh` defaults
+to `False` so that only the sync may drop it --- every later pass opens the same
+store to read and extend what the sync wrote. The project-wide switch is
+`SYNC_REBUILDS_FROM_SCRATCH`.
+:::
+
+## The account
+
+```sql
+CREATE TABLE IF NOT EXISTS account (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    site_url   TEXT    NOT NULL,
+    site_name  TEXT    NOT NULL,
+    user_id    INTEGER,
+    username   TEXT,
+    first_name TEXT,
+    last_name  TEXT,
+    full_name  TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+```
+
+Every column is a field of `core_webservice_get_site_info`, which the login
+already fetches to validate the token; `ACCOUNT_FIELDS` maps Moodle's spelling
+(`sitename`, `firstname`) onto the columns. `save_account()` is an
+`INSERT OR REPLACE` on `id = 1`, and `CHECK (id = 1)` is the constraint that
+says there is only ever one: a second account would own a second set of
+courses, and `course_document` has no owner column. Signing in somewhere else
+overwrites the identity rather than adding to it.
+
+Stage 2 of the sync writes it, not stage 1 where the site info arrives ---
+stage 2 opens the store with `fresh=True`, which would drop anything stage 1
+had put there.
+
+Values are stored as Moodle sends them. ZHAW returns `full_name` as
+`"Fynn Fischer (T LE-T-BA-DS-24HS-T)"`, with the class group appended the same
+way a lecturer gets their role appended; `view_model._user()` strips it with
+the same `_ROLE_SUFFIX` the lecturer list uses, so the cleaning lives in one
+place and the stored row stays faithful to the source.
+
+What the dashboard does with it: `user.first_name` is the greeting
+("Good evening, Fynn"), `user.name` and `user.organisation` are the field at
+the bottom of the sidebar. Before the first sync the table is empty, `account()`
+returns `None`, and all three are sent as `null` --- the greeting falls back to
+the time of day alone and the sidebar shows the course count.
+
+Connections run in WAL mode with `sqlite3.Row` as the row factory.
+
+## The activities view
+
+Deadlines live inside `doc` under four different keys with four different
+shapes. `ACTIVITIES_VIEW` flattens them into something that behaves like a
+table: one `json_each` arm per activity group, joined with `UNION ALL`.
+
+```sql
+SELECT c.course_id, c.shortname, c.fullname,
+       'quiz' AS type,
+       json_extract(j.value, '$.cmid')   AS cmid,
+       COALESCE(json_extract(j.value, '$.origin'), 'moodle') AS origin,
+       json_extract(j.value, '$.name')   AS name,
+       json_extract(j.value, '$.url')    AS url,
+       COALESCE(json_extract(j.value, '$.opens_at'),
+                json_extract(j.value, '$.submission_start_at')) AS opens_at,
+       json_extract(j.value, '$.due_at') AS due_at,
+       json_extract(j.value, '$.is_graded')         AS is_graded,
+       json_extract(j.value, '$.is_graded_already') AS is_graded_already,
+       json_extract(j.value, '$.is_outstanding')    AS is_outstanding,
+       json_extract(j.value, '$.grade_max')         AS grade_max,
+       json_extract(j.value, '$.grade_achieved')    AS grade_achieved
+FROM course_document c, json_each(c.doc, '$.quizzes') j
+WHERE json_extract(j.value, '$.cmid') IS NOT NULL
+   OR json_extract(j.value, '$.origin') = 'extracted'
+```
+
+Three details carry weight:
+
+- The arms differ **only** in the group they walk and the type they report,
+  because `document.py` has already normalised every type's deadline to
+  `due_at`. The view does no date logic.
+- The `COALESCE` on `opens_at` exists for workshops, which carry their open date
+  as `submission_start_at`.
+- The `WHERE` keeps real items and drops blank placeholders. A placeholder has
+  neither a `cmid` nor an `origin`; an **extracted** item has an `origin` but no
+  `cmid`, and counts. `origin` defaults to `'moodle'` in the projection, so every
+  row says where it came from.
+
+The arms are generated from `ACTIVITY_GROUPS` in `config.py`, so adding a module
+type is a one-line change:
+
+```python
+ACTIVITY_GROUPS = {
+    "quizzes": "quiz", "assignments": "assign",
+    "workshops": "workshop", "lessons": "lesson",
+}
+```
+
+## Queries
+
+```python
+store = CourseStore("moodle.sqlite")          # fresh=False: read, don't drop
+
+store.courses()                                # id, shortname, fullname, fetched_at
+store.load(31803)                              # one document, parsed
+store.activities(course_id=31803, type="quiz") # via the view; undated last
+store.activities(dated_only=True)
+store.upcoming(days=14, outstanding_only=True) # due within n days, soonest first
+store.save(document)                           # upsert one
+store.save_many(documents)                     # upsert several under one last_seen_at
+```
+
+`activities()` orders by `due_at IS NULL, due_at, shortname` --- undated items
+sort last rather than first, which is what a deadline list wants.
+
+Because the document is the unit of storage, the obvious direct queries work
+too:
+
+```sql
+-- every grading component above 25%, with its provenance
+SELECT shortname,
+       json_extract(g.value, '$.name')           AS component,
+       json_extract(g.value, '$.weight_percent') AS weight,
+       json_extract(g.value, '$.confidence')     AS confidence,
+       json_extract(g.value, '$.source')         AS source
+FROM course_document c, json_each(c.doc, '$.grading') g
+WHERE weight > 25
+ORDER BY weight DESC;
+
+-- anything a model inferred rather than read plainly
+SELECT shortname, json_extract(o.value, '$.name'), json_extract(o.value, '$.quote')
+FROM course_document c, json_each(c.doc, '$.mandatory_onsite') o
+WHERE json_extract(o.value, '$.confidence') = 'low';
+```
+
+## Document shape
+
+```{mermaid}
+flowchart LR
+  D["course document"] --> G["general"]
+  D --> A["quizzes[]<br/>assignments[]<br/>workshops[]<br/>lessons[]"]
+  D --> GR["grading[]"]
+  D --> MO["mandatory_onsite[]"]
+  D --> S["sync"]
+
+  G -.->|"step 1, except credits"| L1["API"]
+  A -.->|"step 1 + extracted rows"| L2["both"]
+  GR -.->|"step 2 only"| L3["model"]
+  MO -.->|"step 2 only"| L3
+
+  classDef api fill:#eaf4ea,stroke:#86b886
+  classDef llm fill:#eef3fb,stroke:#7fa8d8
+  class L1 api
+  class L3 llm
+```
+
+| Key | Filled by | Notes |
+|---|---|---|
+| `general` | Step 1 | `credits` is the one exception --- step 2 only |
+| `quizzes[]` … `lessons[]` | Step 1, appended to by step 2 | Extracted rows have `origin: "extracted"`, `cmid: null` |
+| `grading[]` | Step 2 only | Starts `[]` |
+| `mandatory_onsite[]` | Step 2 only | Starts `[]` |
+| `sync` | Both | `fetched_at`, `extracted_at`, `extraction_model` |
+
+## Example: one real course
+
+`DS.OSI HS26` after both steps. Trimmed only where marked; everything else is
+verbatim.
+
+```json
+{
+  "schema_version": 1,
+  "course_id": 31803,
+  "fetched_at": 1791391302,
+  "general": {
+    "course_id": 31803,
+    "name": "Operating Systems and Infrastructure - HS26",
+    "shortname": "DS.OSI HS26",
+    "lecturers": ["Josef Spillner (T Lehr und Forschungspersonal)"],
+    "credits": null,
+    "category": "Data Science",
+    "format": "topics",
+    "start_date": "2026-09-14",
+    "end_date": null,
+    "url": "https://moodle.zhaw.ch/course/view.php?id=31803"
+  },
+  "quizzes": [],
+  "assignments": [
+    {
+      "cmid": 2134205,
+      "name": "Öffentliche SSH-Schlüssel",
+      "start_date": "2026-09-14", "start_time": "00:00",
+      "due_date": "2026-09-18",   "due_time": "13:00",
+      "cutoff_date": null,        "cutoff_time": null,
+      "opens_at": 1789336800,
+      "due_at": 1789729200,
+      "cutoff_at": null,
+      "attempts_allowed": -1,
+      "submission_status": "submitted",
+      "submitted_at": 1789730343,
+      "is_late": true,
+      "is_graded": true,
+      "grade_max": 100.0,
+      "grade_achieved": null,
+      "is_graded_already": false,
+      "is_outstanding": false,
+      "url": "https://moodle.zhaw.ch/mod/assign/view.php?id=2134205"
+    },
+    {
+      "cmid": null,
+      "name": "Challenge 1 (OS Tools Lab)",
+      "due_date": "2026-10-16",
+      "due_time": null,
+      "description": "Scored challenge at the end of the OS Tools Lab (weeks 1-5), worth 7P in the semester plan.",
+      "origin": "extracted",
+      "source": "31803-ds-osi-hs26/files/0009_semesterplanung.png",
+      "confidence": "medium",
+      "quote": "Challenge 16. October ** 7P"
+    }
+  ],
+  "workshops": [],
+  "lessons": [],
+  "grading": [
+    {
+      "name": "Challenges and project",
+      "weight_percent": 20,
+      "type": "other",
+      "description": "Per-person scored challenges (open book, exam conditions) plus the end-of-semester team project with results presentation.",
+      "source": "31803-ds-osi-hs26/files/0008_osi-logistics-hs26-ds.pdf",
+      "confidence": "high",
+      "quote": "The challenge and project result counts 20% towards the nal module grade.",
+      "origin": "extracted"
+    },
+    {
+      "name": "Final exam",
+      "weight_percent": 80,
+      "type": "exam",
+      "description": "Machine-written electronic exam, on site with BYOD, conducted purely in a text terminal.",
+      "source": "31803-ds-osi-hs26/files/0008_osi-logistics-hs26-ds.pdf",
+      "confidence": "high",
+      "quote": "The exam result counts 80% towards the nal module grade.",
+      "origin": "extracted"
+    }
+  ],
+  "mandatory_onsite": [
+    {
+      "date": "2026-10-16",
+      "time": null,
+      "name": "Challenge 1 (OS Tools Lab)",
+      "description": "Challenge at the end of lab week 5, solved under exam conditions. Labs are on site, so presence is inferred.",
+      "source": "31803-ds-osi-hs26/files/0009_semesterplanung.png",
+      "confidence": "medium",
+      "quote": "Challenge 16. October ** 7P",
+      "origin": "extracted"
+    }
+  ],
+  "sync": {
+    "fetched_at": 1791391302,
+    "extracted_at": 1791391511,
+    "extraction_model": "claude-sonnet-5-5"
+  }
+}
+```
+
+*Trimmed: two further extracted assignments and two further on-site sessions,
+same shape.*
+
+### Reading the example
+
+Almost everything interesting about the design is visible in it:
+
+- **The API returned one assignment; the document has three.** The other two
+  exist only in a semester-plan **PNG**, read by pass 2 and appended with
+  `origin: "extracted"`, `cmid: null`, and a quote (`"Challenge 16. October **
+  7P"`) that can be checked against the image.
+- **`grade_achieved: null` on a submitted, gradeable assignment.** `grade_max`
+  is 100 and `is_graded` is true, but the mark needs the gradebook. This is the
+  single biggest gap for a frontend.
+- **`is_late: true` with `is_outstanding: false`.** Submitted 1 143 seconds past
+  the deadline. Both facts are kept; neither is collapsed into a status string.
+- **`credits: null` even after pass 2.** No document in this course states its
+  ECTS, and the model proposed nothing rather than guessing --- which is the
+  correct answer. Of five courses, one got credits filled.
+- **`confidence` varies within one course.** The 80/20 split is `high` and
+  quotable from the logistics PDF; the challenge dates are `medium` because they
+  come from a screenshot; one pitch date not stated as mandatory came back `low`.
+  A UI should treat anything below `high` as needing a glance.
+- **`"nal"` in two quotes.** A PDF text-extraction artefact (the *fi* ligature in
+  "final"). Quotes are stored exactly as extracted, including flaws --- a cleaned
+  quote could no longer be found in the source.
+
+## Alternate output
+
+`main_test.py` also writes `course_documents.txt`: the same documents
+pretty-printed with `ensure_ascii=False`, one block per course. It exists for
+reading and diffing by eye --- German umlauts stay readable instead of becoming
+`Ö`.

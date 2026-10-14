@@ -1,0 +1,158 @@
+"""HTTP surface: one page and a small JSON API.
+
+The page is a shell; everything in it is drawn by ``static/app.js`` from
+``GET /api/dashboard``. Keeping the rendering on the client is what lets the
+loading screen poll a running sync and then swap itself for the dashboard
+without a reload.
+
+Reads and writes are deliberately lopsided. Every read goes through
+``view_model.dashboard`` and touches nothing but the database. The two writes
+are the two things the design asks for -- storing the API key and starting a
+sync -- and both are POSTs, so no amount of link-following or prefetching can
+spend money or open a browser window.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from typing import Any
+
+from flask import Blueprint, current_app, jsonify, render_template, request
+
+from ..config import ENV_API_KEY_VAR
+from ..extraction.screen import load_dotenv_once, resolve_api_key, store_api_key
+from ..logs import get_logger
+from . import view_model
+
+#: Anthropic keys all start this way. Checked before storing so a typo is
+#: caught here rather than by the first screening call minutes later.
+API_KEY_PATTERN = re.compile(r"^sk-ant-[\w-]{10,}$")
+
+bp = Blueprint("modboard", __name__)
+
+log = get_logger("http")
+
+
+def api_key_present() -> bool:
+    """Whether a key can be resolved from the environment or the keyring.
+
+    ``resolve_api_key`` answers ``None`` both when nothing is stored and when
+    the environment already holds a key, since the SDK reads that itself. Only
+    one of those is a reason to ask the user for one.
+    """
+    load_dotenv_once()
+    return bool(os.environ.get(ENV_API_KEY_VAR) or resolve_api_key())
+
+
+def _store():
+    """The ``CourseStore`` this app was built with."""
+    return current_app.extensions["modboard"]["store"]
+
+
+def _runner():
+    """The ``SyncRunner`` this app was built with."""
+    return current_app.extensions["modboard"]["runner"]
+
+
+def app_state() -> dict[str, Any]:
+    """Which screen the frontend should open on, and why.
+
+    ``onboarding`` is the one decision the server makes about screens: no key
+    means the key screen, no courses means the get-started screen, and anything
+    else means the dashboard. The frontend may navigate away from it afterwards.
+    """
+    runner = _runner()
+    courses = _store().courses()
+    has_key = api_key_present()
+    if not has_key:
+        screen = "apikey"
+    elif not courses:
+        screen = "start"
+    else:
+        screen = "overview"
+    return {
+        "has_api_key": has_key,
+        "course_count": len(courses),
+        "screen": screen,
+        "sync": runner.state(),
+    }
+
+
+# -- the page ----------------------------------------------------------
+
+
+@bp.get("/")
+def index():
+    """Serve the application shell."""
+    return render_template("index.html")
+
+
+# -- reads -------------------------------------------------------------
+
+
+@bp.get("/api/state")
+def get_state():
+    """Return the startup screen, the course count and the sync's progress."""
+    return jsonify(app_state())
+
+
+@bp.get("/api/dashboard")
+def get_dashboard():
+    """Return every course in the shape the frontend renders."""
+    payload = view_model.dashboard(_store())
+    payload["state"] = app_state()
+    return jsonify(payload)
+
+
+@bp.get("/api/courses/<int:course_id>")
+def get_course(course_id: int):
+    """Return one course, for a deep link that does not need the whole set."""
+    document = _store().load(course_id)
+    if document is None:
+        log.warning("GET /api/courses/%s: not in the database", course_id)
+        return jsonify({"error": f"no course {course_id} in the database"}), 404
+    return jsonify(view_model.course_view(document))
+
+
+# -- writes ------------------------------------------------------------
+
+
+@bp.post("/api/key")
+def post_key():
+    """Store an Anthropic API key in the OS credential store."""
+    api_key = str((request.get_json(silent=True) or {}).get("api_key") or "").strip()
+    if not API_KEY_PATTERN.match(api_key):
+        # The key itself is never logged, here or anywhere else.
+        log.warning("POST /api/key rejected: not shaped like an Anthropic key")
+        return jsonify({"error": "That does not look like an Anthropic key."}), 400
+    try:
+        store_api_key(api_key)
+    except Exception as exc:
+        log.exception("POST /api/key: the credential store refused the write")
+        return jsonify({"error": f"Could not reach the credential store: {exc}"}), 500
+    log.info("Anthropic API key stored in the credential store")
+    return jsonify(app_state())
+
+
+@bp.post("/api/sync")
+def post_sync():
+    """Start a sync, unless one is already running."""
+    body = request.get_json(silent=True) or {}
+    use_model = bool(body.get("use_model", True))
+    if use_model and not api_key_present():
+        log.warning("POST /api/sync refused: no Anthropic API key is stored")
+        return jsonify({"error": "No Anthropic API key is stored."}), 400
+    started, state = _runner().start(use_model=use_model)
+    log.info(
+        "POST /api/sync: %s (model stages %s)",
+        "started" if started else "refused, one is already running",
+        "on" if use_model else "off",
+    )
+    return jsonify({"started": started, "sync": state}), (202 if started else 409)
+
+
+@bp.get("/api/sync")
+def get_sync():
+    """Return the current or most recent sync's progress."""
+    return jsonify(_runner().state())
