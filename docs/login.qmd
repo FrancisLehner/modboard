@@ -81,6 +81,12 @@ and takes whichever fires first:
 3. the `a#launchapp` fallback link Moodle renders when the redirect cannot
    fire, polled every 500 ms.
 
+The browser is the user's default when Playwright can drive it, meaning
+Chrome, Edge, Brave, Vivaldi or Chromium (`src/auth/browser.py` reads the
+macOS LaunchServices plist or the Windows `UserChoice` key). A default it
+cannot drive, such as Safari or Firefox, falls back to installed Chrome, then
+Edge, and from source to Playwright's bundled Chromium.
+
 The browser context is created fresh with no `storage_state` and no user data
 directory, and is closed before the function returns --- the SSO session must
 not outlive the capture. Playwright's sync API cannot run inside a live asyncio

@@ -11,11 +11,38 @@ helpers. Prompts are here, since they are the main lever on model output.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 #: Repository root. Paths resolved against this rather than the working
 #: directory, which depends on where a script was run from.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+#: True inside a PyInstaller build. There :data:`PROJECT_ROOT` is the
+#: unpacked bundle, a temp directory deleted on exit, so nothing may be
+#: written under it.
+FROZEN = getattr(sys, "frozen", False)
+
+#: App name, used for the per-user data directory.
+APP_NAME = "Modboard"
+
+
+def _user_data_dir() -> Path:
+    """The OS's per-user application data directory for :data:`APP_NAME`."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming"
+        return Path(base) / APP_NAME
+    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(base) / APP_NAME.lower()
+
+
+#: Where everything the app writes lives: the database, the corpus, logs and
+#: ``.env``. The repository when run from source, the user's data directory
+#: when frozen.
+DATA_DIR = _user_data_dir() if FROZEN else PROJECT_ROOT
 
 
 # ======================================================================
@@ -106,7 +133,7 @@ KEYRING_USER_ANTHROPIC = "default"
 
 #: Optional ``.env`` read into the environment at startup. The SDK reads the
 #: environment and knows nothing about dotfiles. Gitignored.
-ENV_FILE = PROJECT_ROOT / ".env"
+ENV_FILE = DATA_DIR / ".env"
 
 #: Environment variable the SDK reads.
 ENV_API_KEY_VAR = "ANTHROPIC_API_KEY"
@@ -117,15 +144,15 @@ ENV_API_KEY_VAR = "ANTHROPIC_API_KEY"
 # ======================================================================
 
 #: SQLite database: one JSON document per course.
-DEFAULT_DB_PATH = PROJECT_ROOT / "moodle.sqlite"
+DEFAULT_DB_PATH = DATA_DIR / "moodle.sqlite"
 
 #: Pretty-printed dump of the same documents.
-DEFAULT_DUMP_PATH = PROJECT_ROOT / "course_documents.txt"
+DEFAULT_DUMP_PATH = DATA_DIR / "course_documents.txt"
 
 #: Harvest output. A path keeps every corpus in one place, next to the
 #: database; ``None`` falls back to a fresh temp directory per run.
 CORPUS_DIR_PREFIX = "moodle_corpus_"
-DEFAULT_CORPUS_ROOT: Path | None = PROJECT_ROOT / "corpus"
+DEFAULT_CORPUS_ROOT: Path | None = DATA_DIR / "corpus"
 
 #: Index files written into a corpus directory.
 MANIFEST_FILENAME = "manifest.json"
@@ -145,7 +172,7 @@ SYNC_REBUILDS_FROM_SCRATCH = True
 
 #: One log file per application start is written here. Gitignored: a log
 #: belongs to the run that produced it, not to the repository.
-LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR = DATA_DIR / "logs"
 
 #: Every module's logger hangs off this name, so one level setting covers the
 #: whole application and third-party loggers stay separable from ours.

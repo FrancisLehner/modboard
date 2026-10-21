@@ -134,6 +134,8 @@ class CourseStore:
         pass opens the same store to read and extend what the sync wrote.
         """
         self.path = str(path)
+        # A first run of a packaged build starts without its data directory.
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.dropped = drop_database(self.path) if fresh else []
         self._init_schema()
         if self.dropped:

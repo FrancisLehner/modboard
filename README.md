@@ -18,26 +18,52 @@ A read only application that pulls data from all starred moodle courses and extr
 ## Requirements
 
 - Starred courses on moodle. (only those are considered)
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- Google Chrome — the SSO login drives it via Playwright. Without it, run
-  `uv run playwright install chromium` to use the bundled browser instead.
+- A Chromium browser for the SSO login: Google Chrome, Microsoft Edge, Brave
+  or Vivaldi. Your default browser is used if it is one of these, otherwise
+  Chrome, then Edge. Edge ships with Windows; on macOS install
+  [Chrome](https://www.google.com/chrome/) if you use Safari or Firefox.
+- An [Anthropic API key](https://console.anthropic.com/).
 
-## Install
+## Download
+
+Get the zip for your system from the
+[latest release](https://github.com/fynnfischer/modboard/releases/latest):
+
+| System | File |
+|---|---|
+| Windows | `modboard-windows-x64.zip` |
+| Mac with Apple Silicon (M1 and later) | `modboard-macos-arm64.zip` |
+| Mac with Intel | `modboard-macos-x64.zip` |
+
+Unzip it and double-click `modboard`. A terminal window opens and the dashboard
+opens in your browser. Close the terminal window to stop Modboard.
+
+The builds are not signed, so the OS warns on first start:
+
+- **macOS** says the app "cannot be verified". Click **Done**, open
+  **System Settings → Privacy & Security**, scroll down and click
+  **Open Anyway** next to `modboard`. Or run `xattr -c modboard` in the
+  folder before the first start.
+- **Windows** SmartScreen says it "protected your PC". Click **More info**,
+  then **Run anyway**.
+
+Your data (database, documents, logs) is kept in
+`~/Library/Application Support/Modboard` on macOS and `%APPDATA%\Modboard` on
+Windows.
+
+## Run from source
+
+Needs Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 git clone https://github.com/fynnfischer/modboard.git
 cd modboard
 uv sync
-```
-
-## Run
-
-```sh
 uv run python app.py
 ```
 
-Then open <http://127.0.0.1:5000>.
+The dashboard opens at <http://127.0.0.1:8765>. Without Chrome or Edge, run
+`uv run playwright install chromium` to use Playwright's bundled browser.
 
 On first use the page asks for an Anthropic API key; it is stored in the OS
 keyring. Alternatively put it in `.env`:
@@ -46,7 +72,11 @@ keyring. Alternatively put it in `.env`:
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 ```
 
-**Sync** runs the pipeline: a Chrome window opens for SWITCH edu-ID login, the
+To build the executable yourself: `uv run pyinstaller modboard.spec`, output
+in `dist/`. Releases are built by `.github/workflows/release.yml` when a `v*`
+tag is pushed.
+
+**Sync** runs the pipeline: a browser window opens for SWITCH edu-ID login, the
 web-service token is captured and stored in the keyring, then courses are
 pulled, harvested and read. Subsequent runs reuse the stored token.
 
@@ -56,7 +86,8 @@ pulled, harvested and read. Subsequent runs reuse the stored token.
 |---|---|---|
 | `--db` | `moodle.sqlite` | SQLite file to read |
 | `--host` | `127.0.0.1` | |
-| `--port` | `5000` | |
+| `--port` | `8765` | |
+| `--no-browser` | | Do not open the dashboard on start |
 | `--log-dir` | `logs/` | One file per start, 20 kept |
 
 

@@ -32,12 +32,14 @@ logs/modboard-20261014-202414-30600.log
 ```
 
 `logs/` is gitignored — a log belongs to the run that produced it, not to the
-repository. `python app.py --log-dir /somewhere/else` moves it, and the startup
+repository. A packaged build has no repository, so it writes `logs/`, like the
+database and the corpus, under `~/Library/Application Support/Modboard` on
+macOS and `%APPDATA%\Modboard` on Windows. `python app.py --log-dir /somewhere/else` moves it, and the startup
 banner prints the path it chose:
 
 ```bash
 $ uv run python app.py
-Modboard on http://127.0.0.1:5000
+Modboard on http://127.0.0.1:8765
   database /Users/fynnfischer/Projects/moodle_single_page/moodle.sqlite -- 5 course(s)
   logging to /Users/fynnfischer/Projects/moodle_single_page/logs/modboard-20261014-202414-30600.log
 ```
@@ -104,9 +106,9 @@ real output, not an illustration:
 20:24:14 INFO     modboard.session           ====================================================================
 20:24:14 INFO     modboard.session           session started 2026-10-14T20:24:14+02:00
 20:24:14 INFO     modboard.session           python 3.12.13 on macOS-26.3-arm64-arm-64bit (pid 30600)
-20:24:14 INFO     modboard.session           db=/Users/fynnfischer/.../moodle.sqlite site=https://moodle.zhaw.ch address=http://127.0.0.1:5000 debug=False
+20:24:14 INFO     modboard.session           db=/Users/fynnfischer/.../moodle.sqlite site=https://moodle.zhaw.ch address=http://127.0.0.1:8765 debug=False
 20:24:14 INFO     modboard.session           ====================================================================
-20:24:14 INFO     modboard.app               serving on http://127.0.0.1:5000 -- 5 course(s)
+20:24:14 INFO     modboard.app               serving on http://127.0.0.1:8765 -- 5 course(s)
 
 20:24:52 INFO     modboard.http              POST /api/sync: started (model stages on)
 20:24:52 INFO     modboard.sync              sync started: site https://moodle.zhaw.ch, model stages on

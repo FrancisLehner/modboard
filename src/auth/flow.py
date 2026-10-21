@@ -35,12 +35,14 @@ import requests
 
 from ..config import (
     DEFAULT_URL_SCHEME,
+    FROZEN,
     HTTP_TIMEOUT,
     LOGIN_TIMEOUT_SECONDS,
     MOBILE_SERVICE,
 )
 from ..errors import MoodleAuthError
 from ..logs import echo, get_logger
+from .browser import default_browser
 
 log = get_logger("moodle.auth")
 
@@ -245,22 +247,43 @@ class BrowserTokenCapture:
         return captured["captured"]
 
     def _launch_browser(self, playwright):
-        """Launch the installed Chrome, falling back to bundled Chromium."""
-        try:
-            browser = playwright.chromium.launch(
-                channel="chrome", headless=self.headless
-            )
-            return browser, "Using installed Google Chrome."
-        except Exception:
+        """Launch the default browser if Playwright can drive it, else Chrome or Edge.
+
+        Run from source, Playwright's own Chromium is the last resort; a
+        packaged build does not ship it.
+        """
+        default = default_browser()
+        attempts: list[tuple[str, dict]] = []
+        if default and default.executable:
+            attempts.append((default.name, {"executable_path": str(default.executable)}))
+        attempts += [
+            ("Google Chrome", {"channel": "chrome"}),
+            ("Microsoft Edge", {"channel": "msedge"}),
+        ]
+        if not FROZEN:
+            attempts.append(("Playwright's bundled Chromium", {}))
+
+        tried = set()
+        errors = []
+        for name, options in attempts:
+            if name in tried:
+                continue
+            tried.add(name)
             try:
-                browser = playwright.chromium.launch(headless=self.headless)
+                browser = playwright.chromium.launch(headless=self.headless, **options)
             except Exception as exc:
-                raise MoodleAuthError(
-                    "Could not start a browser. Install Playwright's Chromium with:\n"
-                    "  uv run playwright install chromium\n"
-                    f"Underlying error: {exc}"
-                ) from exc
-            return browser, "Using Playwright's bundled Chromium."
+                log.info("could not launch %s: %s", name, exc)
+                errors.append(f"{name}: {exc}")
+                continue
+            how = f"Using {name}."
+            if default and not default.executable and name != default.name:
+                how = f"Your default browser ({default.name}) cannot be automated. {how}"
+            return browser, how
+        raise MoodleAuthError(
+            "Could not start a browser for the login. Install Google Chrome "
+            "(https://www.google.com/chrome/) and sync again.\n"
+            + "\n".join(errors)
+        )
 
 
 class MoodleAuthenticator:
