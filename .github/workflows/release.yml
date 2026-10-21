@@ -34,6 +34,8 @@ jobs:
       # The Python version comes from .python-version.
       - run: uv sync --locked
 
+      - run: uv run python -m unittest discover -s tests
+
       - run: uv run pyinstaller modboard.spec --noconfirm
 
       # A zip keeps the executable bit on macOS; the browser download would
