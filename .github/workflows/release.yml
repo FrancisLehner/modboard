@@ -28,7 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no major-version tag, only full versions.
+      - uses: astral-sh/setup-uv@v10.3.0
 
       # The Python version comes from .python-version.
       - run: uv sync --locked
