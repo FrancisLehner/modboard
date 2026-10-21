@@ -26,9 +26,9 @@ jobs:
             asset: modboard-macos-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
 
       # The Python version comes from .python-version.
       - run: uv sync --locked
@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Windows'
         run: Compress-Archive -Path dist/modboard.exe -DestinationPath ${{ matrix.asset }}.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}.zip
@@ -54,11 +54,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: "*.zip"
           generate_release_notes: true
