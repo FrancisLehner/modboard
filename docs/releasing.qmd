@@ -1,0 +1,86 @@
+---
+title: "Releasing"
+subtitle: "From a commit on main to zips users can download"
+---
+
+A release is a **version tag**. Pushing a tag that starts with `v` builds the
+application for every platform and publishes a GitHub Release with one zip per
+platform. Ordinary pushes to `main` build nothing.
+
+::: {.callout-note appearance="simple"}
+`modboard.spec` is the PyInstaller recipe and
+`.github/workflows/release.yml` the workflow. Nothing on GitHub needs setting
+up: the workflow asks for the write permission it needs itself.
+:::
+
+## Release a new version
+
+1. Make sure `main` is pushed and works from source: `uv run python app.py`.
+2. Bump `version` in `pyproject.toml`, for example `0.1.0` → `0.2.0`, then commit
+   and push.
+3. Optional: build without releasing. **Actions → Release → Run workflow**
+   builds the three zips and attaches them to the run under **Artifacts**. No
+   release is created.
+4. Tag the same version and push the tag:
+
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+5. Wait for the run under **Actions** (about 5 minutes). The Release appears
+   under **Releases** with generated notes and these files:
+
+   | File | For |
+   |---|---|
+   | `modboard-windows-x64.zip` | Windows |
+   | `modboard-macos-arm64.zip` | Macs with Apple Silicon (M1 and later) |
+   | `modboard-macos-x64.zip` | Macs with Intel |
+
+The README links to `releases/latest`, so it points at the new version without
+an edit.
+
+## What the workflow does
+
+```{mermaid}
+flowchart LR
+  T["push tag v*"] --> W["build on windows-latest"]
+  T --> A["build on macos-latest (arm64)"]
+  T --> I["build on macos-15-intel (x64)"]
+  W --> R["release: publish the zips"]
+  A --> R
+  I --> R
+```
+
+PyInstaller does not cross-compile, so each platform builds on its own runner:
+`uv sync --locked`, then `pyinstaller modboard.spec`, then a zip. The
+**release** job only runs for a tag; a manual run stops after the builds.
+
+## Building locally
+
+```bash
+uv run pyinstaller modboard.spec --noconfirm   # -> dist/modboard
+```
+
+The result is one executable for the machine it was built on. It does not
+pick up later source edits: rebuild after every change. It keeps its data in
+`~/Library/Application Support/Modboard` (macOS) or `%APPDATA%\Modboard`
+(Windows), not in the repository; see `DATA_DIR` in `src/config.py`.
+
+Two macOS details while testing a local build:
+
+- **Keychain prompts.** Secrets saved while running from source belong to
+  Python, so the build asks before reading them. Each rebuild is a new,
+  ad-hoc-signed program, and "Always Allow" does not carry over. Run from
+  source while developing.
+- **No Gatekeeper warning.** A local build is not marked as downloaded. To see
+  what users see, download the zip from a workflow run.
+
+## If something goes wrong
+
+| Symptom | Fix |
+|---|---|
+| A tag was pushed for the wrong commit | Delete the Release on GitHub, then `git push --delete origin v0.2.0` and `git tag -d v0.2.0`, and tag again |
+| `uv sync --locked` fails | `uv.lock` is out of date: run `uv lock`, commit, push, tag again |
+| The **release** job fails with `403` | **Settings → Actions → General → Workflow permissions → Read and write** |
+| The build succeeds but the app cannot find a template or file | It is missing from `datas` in `modboard.spec` |

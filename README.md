@@ -74,7 +74,7 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 
 To build the executable yourself: `uv run pyinstaller modboard.spec`, output
 in `dist/`. Releases are built by `.github/workflows/release.yml` when a `v*`
-tag is pushed.
+tag is pushed; see [Releasing](https://fynnfischer.github.io/modboard/releasing.html).
 
 **Sync** runs the pipeline: a browser window opens for SWITCH edu-ID login, the
 web-service token is captured and stored in the keyring, then courses are

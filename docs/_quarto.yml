@@ -21,6 +21,8 @@ website:
         text: Database
       - href: logging.qmd
         text: Logging
+      - href: releasing.qmd
+        text: Releasing
     tools:
       - icon: github
         href: https://github.com/fynnfischer/modboard
