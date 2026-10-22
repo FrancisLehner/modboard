@@ -47,8 +47,9 @@ the database first: `CourseStore(path, fresh=True)` calls `drop_database()`,
 which removes the file *and* its `-wal`/`-shm` sidecars (deleting the database
 alone would leave a WAL that SQLite replays into the new file). `fresh` defaults
 to `False` so that only the sync may drop it --- every later pass opens the same
-store to read and extend what the sync wrote. The project-wide switch is
-`SYNC_REBUILDS_FROM_SCRATCH`.
+store to read and extend what the sync wrote. What pass 2 added is not lost
+with it: an unchanged course gets its cached proposal from `extraction.json`
+merged onto the rebuilt record again, without a model call.
 :::
 
 ## The account

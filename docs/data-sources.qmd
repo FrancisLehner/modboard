@@ -204,6 +204,9 @@ The manifest is the index everything downstream reads. A `texts[]` entry:
   "name": "Gedrucktes Lehrbuch (vdf)",
   "stored_path": "31803-ds-osi-hs26/text/0001_module-intro_gedrucktes-lehrbuch-vdf.html",
   "chars": 188,
+  "sha256": "9f2c…",
+  "retrieved_at": 1761140000,
+  "change": "unchanged",
   "section": "Vorlesungsunterlagen",
   "cmid": 2134191,
   "instance": 185248,
@@ -218,6 +221,15 @@ A `files[]` entry adds `fileurl`, `mimetype`, `filesize`, `timemodified`,
 `source`, and either `stored_path` + `bytes` or a `skipped` reason.
 `stored_path` is the **stable id** for a document --- pass 1 and pass 2 both
 address documents by it.
+
+Every stored item also carries `sha256` (of its bytes on disk), `retrieved_at`
+(when those bytes were fetched or written, carried over while they are reused)
+and `change`: `new`, `modified` or `unchanged` relative to the previous
+harvest. A file is reused when its `fileurl`, `timemodified` and `filesize`
+all match the previous manifest; a text when its module and `sha256` do. Pass 1
+caches verdicts by `(course_id, sha256)`, and pass 2 caches each course's
+proposal under a fingerprint of its relevant documents' hashes, so only new or
+changed content is sent to the model.
 
 ## Call cost
 

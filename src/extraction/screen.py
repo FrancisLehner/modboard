@@ -13,6 +13,10 @@ nothing can parse yet is ``None``.
 ``None`` is distinct from ``False``. A document nobody could read is not a
 document found irrelevant, and conflating the two hides the pipeline's blind
 spots.
+
+A model verdict is cached by the document's ``sha256``: when the previous
+report holds one for the same course and the same content, it is reused
+rather than paid for again, so a sync only screens what Moodle changed.
 """
 
 from __future__ import annotations
@@ -162,6 +166,10 @@ class Verdict:
     truncated: bool = False
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: The content hash from the manifest; the key a later run reuses this by.
+    sha256: str | None = None
+    #: True when this verdict was carried over from the previous report.
+    reused: bool = False
 
 
 class DocumentScreener:
@@ -217,10 +225,15 @@ class DocumentScreener:
         documents. Format-rule verdicts are free and not counted.
         """
         documents = list(self.reader.walk(course_ids))
+        cached = self._previous_verdicts()
         decided: list[Verdict] = []
         to_call: list[tuple[int, ReadableDocument]] = []
+        reused = 0
         for course_id, doc in documents:
             verdict = self._decide_without_model(course_id, doc)
+            if verdict is None:
+                verdict = self._reuse(course_id, doc, cached)
+                reused += verdict is not None
             if verdict is None:
                 to_call.append((course_id, doc))
             else:
@@ -235,22 +248,24 @@ class DocumentScreener:
                         stored_path=doc.stored_path, course_id=course_id, name=doc.name,
                         origin=doc.origin, medium=doc.medium, relevant=None,
                         reason="not screened: --limit reached", decided_by="skipped",
-                        truncated=doc.truncated,
+                        truncated=doc.truncated, sha256=doc.meta.get("sha256"),
                     )
                 )
 
         self.on_message(
             f"{len(documents)} document(s): {len(to_call)} to screen, "
-            f"{len(decided)} decided without a call."
+            f"{reused} unchanged since the last screening, "
+            f"{len(decided) - reused} decided without a call."
         )
         log.info(
             "screening %d document(s) with %s on %d worker(s): "
-            "%d need a call, %d decided on format alone",
+            "%d need a call, %d reused, %d decided on format alone",
             len(documents),
             self.model,
             self.workers,
             len(to_call),
-            len(decided),
+            reused,
+            len(decided) - reused,
         )
 
         started = time.monotonic()
@@ -319,7 +334,46 @@ class DocumentScreener:
         """Return the documents pass 2 should read, in report order."""
         return [v["stored_path"] for v in report["verdicts"] if v["relevant"] is True]
 
-    # -- the two free verdicts ---------------------------------------------
+    # -- the free verdicts -------------------------------------------------
+
+    def _previous_verdicts(self) -> dict[tuple[int, str], dict[str, Any]]:
+        """Return the last report's model verdicts by ``(course_id, sha256)``.
+
+        Only answers the model gave are cached: an error, a skip or an
+        unreadable verdict is worth asking again.
+        """
+        path = self.reader.root / SCREENING_FILENAME
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if report.get("model") != self.model:
+            return {}
+        return {
+            (int(v.get("course_id") or 0), v["sha256"]): v
+            for v in report.get("verdicts") or []
+            if v.get("sha256") and v.get("decided_by") == "model"
+        }
+
+    def _reuse(
+        self,
+        course_id: int,
+        doc: ReadableDocument,
+        cached: dict[tuple[int, str], dict[str, Any]],
+    ) -> Verdict | None:
+        """Return the cached verdict for unchanged content, or ``None``."""
+        sha256 = doc.meta.get("sha256")
+        previous = cached.get((course_id, sha256)) if sha256 else None
+        if previous is None:
+            return None
+        return Verdict(
+            stored_path=doc.stored_path, course_id=course_id, name=doc.name,
+            origin=doc.origin, medium=doc.medium, relevant=previous.get("relevant"),
+            categories=list(previous.get("categories") or []),
+            reason=str(previous.get("reason") or ""),
+            evidence=str(previous.get("evidence") or ""),
+            decided_by="model", truncated=doc.truncated, sha256=sha256, reused=True,
+        )
 
     def _decide_without_model(
         self, course_id: int, doc: ReadableDocument
@@ -331,7 +385,7 @@ class DocumentScreener:
         base = dict(
             stored_path=doc.stored_path, course_id=course_id, name=doc.name,
             origin=doc.origin, medium=doc.medium, reason=reason,
-            truncated=doc.truncated,
+            truncated=doc.truncated, sha256=doc.meta.get("sha256"),
         )
         if reason.startswith("inert format"):
             # A stylesheet cannot describe how a course is graded.
@@ -369,6 +423,7 @@ class DocumentScreener:
         base = dict(
             stored_path=doc.stored_path, course_id=course_id, name=doc.name,
             origin=doc.origin, medium=doc.medium, truncated=doc.truncated,
+            sha256=doc.meta.get("sha256"),
         )
         if self._abort.is_set():
             return Verdict(relevant=None, reason=f"aborted: {self._abort_reason}",
@@ -461,6 +516,7 @@ class DocumentScreener:
                 "not_relevant": sum(1 for v in verdicts if v.relevant is False),
                 "undecided": sum(1 for v in verdicts if v.relevant is None),
                 "errors": sum(1 for v in verdicts if v.decided_by == "error"),
+                "reused": sum(1 for v in verdicts if v.reused),
                 "input_tokens": sum(v.input_tokens or 0 for v in verdicts),
                 "output_tokens": sum(v.output_tokens or 0 for v in verdicts),
             },

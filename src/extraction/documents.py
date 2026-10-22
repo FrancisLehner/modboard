@@ -173,7 +173,8 @@ class CorpusReader:
             name=str(item.get("filename") or ""),
             meta={k: v for k, v in item.items()
                   if k in {"modname", "module_name", "section", "source", "mimetype",
-                           "cmid", "filesize", "timemodified", "fileurl"}},
+                           "cmid", "filesize", "timemodified", "fileurl",
+                           "sha256", "retrieved_at", "change"}},
         )
         path = self.root / doc.stored_path
         suffix = path.suffix.lower()

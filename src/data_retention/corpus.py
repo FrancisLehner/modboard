@@ -9,6 +9,14 @@ index recording where each piece came from.
 Nothing is summarised, converted or interpreted: HTML stays HTML, files stay
 bytes, and files are deduplicated by ``fileurl`` rather than by filename.
 
+A harvest updates the previous one in place unless told to start fresh. A file
+is downloaded again only when Moodle reports a different ``timemodified`` or
+size for its ``fileurl``; a text is rewritten only when its content differs.
+Every item records when its bytes were retrieved, their ``sha256``, and
+whether this run found it ``new``, ``modified`` or ``unchanged``, so the passes
+after this one can skip what they have already seen. Whatever a course no
+longer lists is deleted from disk.
+
 Layout produced::
 
     <root>/
@@ -67,6 +75,15 @@ _COURSE_DIR = re.compile(r"^\d+-")
 # ----------------------------------------------------------------------
 # Disk side
 # ----------------------------------------------------------------------
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a stored item's bytes -- the identity later passes cache by."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def clear_corpus(root: str | Path) -> list[Path]:
@@ -155,8 +172,19 @@ class CorpusWriter:
         return directory
 
     def _next_index(self, directory: Path) -> int:
-        """Return the next running number for a directory, so pull order is kept."""
-        self._counters[directory] = self._counters.get(directory, 0) + 1
+        """Return the next running number for a directory, so pull order is kept.
+
+        Seeded from what is already there, so a file added by a later harvest
+        is numbered after the ones an earlier harvest kept.
+        """
+        if directory not in self._counters:
+            existing = (
+                int(m.group(1))
+                for entry in (directory.iterdir() if directory.is_dir() else ())
+                if (m := re.match(r"^(\d+)_", entry.name))
+            )
+            self._counters[directory] = max(existing, default=0)
+        self._counters[directory] += 1
         return self._counters[directory]
 
     def _unique(self, directory: Path, stem: str, suffix: str) -> Path:
@@ -185,6 +213,38 @@ class CorpusWriter:
         suffix = Path(safe).suffix[:12]
         stem = self.slug(Path(safe).stem)
         return self._unique(course_dir / "files", stem, suffix)
+
+    def read_manifest(self) -> dict[str, Any] | None:
+        """Return the manifest a previous harvest left in the root, if any."""
+        path = self.root / MANIFEST_FILENAME
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def prune(self, keep: set[str], course_dirs: set[str]) -> list[Path]:
+        """Delete stored items not in ``keep`` and course dirs not in ``course_dirs``.
+
+        ``keep`` holds root-relative paths. Only what a run writes is touched,
+        as in :func:`clear_corpus`.
+        """
+        removed = []
+        for entry in sorted(self.root.iterdir()):
+            if not (entry.is_dir() and _COURSE_DIR.match(entry.name)):
+                continue
+            if entry.name not in course_dirs:
+                shutil.rmtree(entry)
+                removed.append(entry)
+                continue
+            for sub in ("text", "files"):
+                directory = entry / sub
+                if not directory.is_dir():
+                    continue
+                for item in sorted(directory.iterdir()):
+                    if item.is_file() and self.relative(item) not in keep:
+                        item.unlink()
+                        removed.append(item)
+        return removed
 
     def write_manifest(self, manifest: dict[str, Any]) -> Path:
         """Write the manifest into the root. Returns the path."""
@@ -235,10 +295,28 @@ class CourseHarvest:
     #: modules still gets recorded twice -- which is the truth about the course.
     seen_texts: set[tuple[Any, str]] = field(default_factory=set, repr=False)
     seen_links: set[tuple[Any, str]] = field(default_factory=set, repr=False)
+    #: The previous harvest's items for this course, so unchanged ones are
+    #: reused rather than fetched again. Texts by ``(cmid, sha256)``, files by
+    #: ``fileurl``; the ``*_names`` sets only tell "modified" from "new".
+    previous_texts: dict[tuple[Any, str], dict[str, Any]] = field(
+        default_factory=dict, repr=False
+    )
+    previous_files: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    previous_text_names: set[tuple[Any, ...]] = field(default_factory=set, repr=False)
+    previous_file_names: set[tuple[Any, ...]] = field(default_factory=set, repr=False)
+
+    def stored_paths(self) -> set[str]:
+        """Every root-relative path this course's manifest entry points at."""
+        return {
+            item["stored_path"]
+            for item in (*self.texts, *self.files)
+            if item.get("stored_path")
+        }
 
     def as_dict(self) -> dict[str, Any]:
         """Return the manifest entry for this course, with counts."""
         downloaded = [f for f in self.files if f.get("stored_path")]
+        changes = [i.get("change") for i in (*self.texts, *downloaded)]
         return {
             "course_id": self.course_id,
             "shortname": self.shortname,
@@ -251,6 +329,9 @@ class CourseHarvest:
                 "bytes_downloaded": sum(f.get("bytes") or 0 for f in downloaded),
                 "links": len(self.links),
                 "warnings": len(self.warnings),
+                "new": changes.count("new"),
+                "modified": changes.count("modified"),
+                "unchanged": changes.count("unchanged"),
             },
             "texts": self.texts,
             "files": self.files,
@@ -286,12 +367,14 @@ class UnstructuredHarvester:
     ) -> None:
         """Configure the output directory, download limits and optional sources.
 
-        ``fresh`` clears a previous harvest out of ``root`` first, so the corpus
-        matches what the courses hold now and a file a course has removed does
-        not linger to be screened again.
+        ``fresh`` clears a previous harvest out of ``root`` first and pulls
+        everything again. Otherwise the previous manifest is read and whatever
+        it holds unchanged is reused; either way a file a course has removed
+        does not linger to be screened again.
         """
         self.session = session
         self.writer = CorpusWriter(root, fresh=fresh)
+        self.previous = self._previous_manifest()
         self.download_files = download_files
         self.max_file_bytes = max_file_bytes
         self.skip_mimetype_prefixes = tuple(skip_mimetype_prefixes)
@@ -310,6 +393,23 @@ class UnstructuredHarvester:
     def root(self) -> Path:
         """The directory the corpus is written to."""
         return self.writer.root
+
+    def _previous_manifest(self) -> dict[int, dict[str, Any]]:
+        """Return the previous harvest's course entries by id, if reusable.
+
+        A manifest from another site describes other files, so it is ignored
+        and its course directories are pruned like any removed course's.
+        """
+        manifest = self.writer.read_manifest()
+        if not manifest:
+            return {}
+        if manifest.get("site_url") != self.session.site_url:
+            log.info("previous manifest is for %s -- not reusing it", manifest.get("site_url"))
+            return {}
+        return {
+            int(course.get("course_id") or 0): course
+            for course in manifest.get("courses") or []
+        }
 
     # -- entry points ------------------------------------------------------
 
@@ -343,6 +443,7 @@ class UnstructuredHarvester:
             self.on_message(
                 f"    {counts['texts']} text item(s), "
                 f"{counts['files_downloaded']}/{counts['files_seen']} file(s), "
+                f"{counts['new']} new, {counts['modified']} modified, "
                 f"{counts['warnings']} warning(s)"
             )
             for warning in harvest.warnings:
@@ -429,6 +530,17 @@ class UnstructuredHarvester:
             directory=self.writer.relative(directory),
             warnings=list(batched["_warnings"]),
         )
+        previous = self.previous.get(course_id) or {}
+        for item in previous.get("texts") or []:
+            if item.get("stored_path") and item.get("sha256"):
+                harvest.previous_texts[(item.get("cmid"), item["sha256"])] = item
+            harvest.previous_text_names.add(
+                (item.get("kind"), item.get("cmid"), item.get("name"))
+            )
+        for item in previous.get("files") or []:
+            if item.get("stored_path") and item.get("fileurl"):
+                harvest.previous_files[item["fileurl"]] = item
+            harvest.previous_file_names.add((item.get("cmid"), item.get("filename")))
 
         # Sections, module intros and the file inventory.
         self._harvest_contents(course_id, directory, harvest)
@@ -798,13 +910,31 @@ class UnstructuredHarvester:
         if key in harvest.seen_texts:
             return  # the same module's text, reached through a second endpoint
         harvest.seen_texts.add(key)
-        path = self.writer.write_text(directory, kind, name, body)
+        name = str(name or "").strip()
+        sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+        previous = harvest.previous_texts.get((meta.get("cmid"), sha256))
+        if previous and (self.root / previous["stored_path"]).is_file():
+            stored_path, retrieved_at, change = (
+                previous["stored_path"], previous.get("retrieved_at"), "unchanged"
+            )
+        else:
+            path = self.writer.write_text(directory, kind, name, body)
+            stored_path, retrieved_at = self.writer.relative(path), int(time.time())
+            change = (
+                "modified"
+                if (kind, meta.get("cmid"), name) in harvest.previous_text_names
+                else "new"
+            )
         harvest.texts.append(
             {
                 "kind": kind,
-                "name": str(name or "").strip(),
-                "stored_path": self.writer.relative(path),
+                "name": name,
+                "stored_path": stored_path,
                 "chars": len(body),
+                "sha256": sha256,
+                "retrieved_at": retrieved_at,
+                "change": change,
                 **meta,
             }
         )
@@ -873,6 +1003,9 @@ class UnstructuredHarvester:
             "timemodified": entry.get("timemodified"),
             "stored_path": None,
             "bytes": None,
+            "sha256": None,
+            "retrieved_at": None,
+            "change": None,
             "skipped": None,
         }
         harvest.files.append(record)
@@ -883,16 +1016,46 @@ class UnstructuredHarvester:
             log.debug("skipped %s: %s", filename, skip)
             return
 
+        previous = harvest.previous_files.get(fileurl)
+        if previous and self._unchanged(previous, record):
+            record.update(
+                stored_path=previous["stored_path"],
+                bytes=previous.get("bytes"),
+                sha256=previous.get("sha256")
+                or sha256_file(self.root / previous["stored_path"]),
+                retrieved_at=previous.get("retrieved_at"),
+                change="unchanged",
+            )
+            log.debug("kept %s: unchanged on Moodle", record["stored_path"])
+            return
+
         path = self.writer.file_path(directory, filename)
         try:
             record["bytes"] = self._download(fileurl, path, record.get("mimetype"))
             record["stored_path"] = self.writer.relative(path)
+            record["sha256"] = sha256_file(path)
+            record["retrieved_at"] = int(time.time())
+            # A resource's fileurl carries its revision, so an edited file
+            # arrives under a new url; its module and name still match.
+            record["change"] = (
+                "modified"
+                if previous or (base.get("cmid"), filename) in harvest.previous_file_names
+                else "new"
+            )
             log.debug("downloaded %s (%s bytes)", record["stored_path"], record["bytes"])
         except Exception as exc:  # network, disk, oversize -- never fatal
             record["skipped"] = f"download failed: {exc}"
             harvest.warnings.append(f"{filename}: {exc}")
             path.unlink(missing_ok=True)
             log.warning("download failed for %s: %s", filename, exc)
+
+    def _unchanged(self, previous: dict[str, Any], record: dict[str, Any]) -> bool:
+        """True when Moodle describes the file as it did when it was stored."""
+        return (
+            previous.get("timemodified") == record.get("timemodified")
+            and previous.get("filesize") == record.get("filesize")
+            and (self.root / previous["stored_path"]).is_file()
+        )
 
     def _skip_reason(self, record: dict[str, Any]) -> str | None:
         """Return why a file will not be fetched, or ``None`` to fetch it."""
@@ -970,7 +1133,17 @@ class UnstructuredHarvester:
     # -- manifest ----------------------------------------------------------
 
     def _write_manifest(self, harvests: list[CourseHarvest]) -> dict[str, Any]:
-        """Assemble the manifest, write it to disk and return it."""
+        """Prune what is no longer listed, then write the manifest and return it."""
+        keep = set().union(*(h.stored_paths() for h in harvests))
+        # A reused item may still sit in a directory named for an older
+        # shortname, so that directory stays too.
+        removed = self.writer.prune(
+            keep=keep,
+            course_dirs={Path(h.directory).name for h in harvests}
+            | {Path(path).parts[0] for path in keep},
+        )
+        if removed:
+            log.info("removed %d item(s) no longer on Moodle", len(removed))
         entries = [h.as_dict() for h in harvests]
         manifest = {
             "schema_version": CORPUS_SCHEMA_VERSION,
@@ -996,6 +1169,10 @@ class UnstructuredHarvester:
                 ),
                 "links": sum(e["counts"]["links"] for e in entries),
                 "warnings": sum(e["counts"]["warnings"] for e in entries),
+                "new": sum(e["counts"]["new"] for e in entries),
+                "modified": sum(e["counts"]["modified"] for e in entries),
+                "unchanged": sum(e["counts"]["unchanged"] for e in entries),
+                "removed": len(removed),
             },
             "courses": entries,
         }
@@ -1003,13 +1180,18 @@ class UnstructuredHarvester:
         totals = manifest["totals"]
         log.info(
             "harvest complete: %d course(s), %d text item(s), %d file(s) "
-            "(%.1f MB), %d link(s), %d warning(s) -- manifest in %s",
+            "(%.1f MB), %d link(s), %d warning(s); %d new, %d modified, "
+            "%d unchanged, %d removed -- manifest in %s",
             totals["courses"],
             totals["texts"],
             totals["files_downloaded"],
             totals["bytes_downloaded"] / 1_048_576,
             totals["links"],
             totals["warnings"],
+            totals["new"],
+            totals["modified"],
+            totals["unchanged"],
+            totals["removed"],
             self.root,
         )
         return manifest

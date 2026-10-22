@@ -159,11 +159,12 @@ MANIFEST_FILENAME = "manifest.json"
 SCREENING_FILENAME = "screening.json"
 EXTRACTION_FILENAME = "extraction.json"
 
-#: A sync rebuilds rather than updates: the database and the corpus are
-#: cleared before they are rewritten, so a run cannot inherit a stale
-#: document or a file a course has since removed. Set to ``False`` once
-#: there is a reuse check worth having -- nothing else needs changing.
-SYNC_REBUILDS_FROM_SCRATCH = True
+#: ``True`` clears the corpus before every harvest and pulls everything again.
+#: ``False`` updates it in place: a file is downloaded only when Moodle reports
+#: a new ``timemodified`` or size, a text is rewritten only when its content
+#: changed, and whatever a course no longer lists is deleted. Screening and
+#: extraction then reuse their verdicts for content whose hash is unchanged.
+SYNC_REBUILDS_FROM_SCRATCH = False
 
 
 # ======================================================================
@@ -239,7 +240,8 @@ DEFAULT_UPCOMING_DAYS = 60
 # Harvest (phase 1b) -- pulling raw prose and files
 # ======================================================================
 
-CORPUS_SCHEMA_VERSION = 1
+#: 2 added ``retrieved_at``, ``sha256`` and ``change`` to every item.
+CORPUS_SCHEMA_VERSION = 2
 
 #: Refuse a single file larger than this.
 MAX_FILE_BYTES = 128 * 1024 * 1024

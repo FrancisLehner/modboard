@@ -10,6 +10,10 @@ out what it changed would mean diffing and trusting the diff. Returning only
 additions makes "nothing existing was changed" true by construction: no code
 here writes to a field that holds a value.
 
+It also makes a proposal reusable. The sync rebuilds each record from the API,
+so a course whose relevant documents hash the same as last time gets its
+previous proposal merged onto the new record, without a call.
+
 ::
 
     extractor = FieldExtractor(CorpusReader(root), CourseStore(db))
@@ -20,6 +24,7 @@ here writes to a field that holds a value.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -153,6 +158,12 @@ class CourseExtraction:
     error: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: Hash of what the proposal was made from; equal hashes mean equal input.
+    input_fingerprint: str | None = None
+    #: When the model produced the proposal, which a reuse carries forward.
+    extracted_at: int | None = None
+    #: True when the proposal came from the previous report, not a call.
+    reused: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Return the report entry for this course."""
@@ -165,6 +176,9 @@ class CourseExtraction:
             "error": self.error,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "input_fingerprint": self.input_fingerprint,
+            "extracted_at": self.extracted_at,
+            "reused": self.reused,
             "proposal": self.proposal,
             "merge": self.merge.as_dict() if self.merge else None,
         }
@@ -225,6 +239,8 @@ class FieldExtractor:
         """Extend every screened course. ``write=False`` saves nothing."""
         screening = self._load_screening()
         relevant = self._relevant_by_course(screening, course_ids)
+        fingerprints = self._fingerprints(screening)
+        cached = self._previous_proposals()
         if not relevant:
             self.on_message("No documents were marked relevant -- nothing to extract.")
             log.warning("no documents were marked relevant -- nothing to extract")
@@ -248,7 +264,13 @@ class FieldExtractor:
         results: list[CourseExtraction] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.workers) as pool:
             futures = [
-                pool.submit(self._extract_course, course_id, paths)
+                pool.submit(
+                    self._extract_course,
+                    course_id,
+                    paths,
+                    fingerprints.get(course_id),
+                    cached.get(course_id),
+                )
                 for course_id, paths in sorted(relevant.items())
             ]
             for future in concurrent.futures.as_completed(futures):
@@ -278,6 +300,7 @@ class FieldExtractor:
         self.on_message(
             f"  {result.shortname}: {counts['applied']} added, "
             f"{counts['rejected']} rejected, {len(result.documents_read)} doc(s) read"
+            + (" (unchanged, reused)" if result.reused else "")
         )
         log.info(
             "%s (%s): %d added, %d rejected, %d doc(s) read",
@@ -315,6 +338,38 @@ class FieldExtractor:
             grouped.setdefault(course_id, []).append(str(verdict.get("stored_path")))
         return grouped
 
+    def _fingerprints(self, screening: dict[str, Any]) -> dict[int, str]:
+        """Hash each course's relevant content, together with the model settings.
+
+        A course with a relevant document that has no ``sha256`` gets no
+        fingerprint, so it is never reused.
+        """
+        hashes: dict[int, list[str | None]] = {}
+        for verdict in screening.get("verdicts") or []:
+            if verdict.get("relevant") is True:
+                hashes.setdefault(int(verdict.get("course_id") or 0), []).append(
+                    verdict.get("sha256")
+                )
+        out = {}
+        for course_id, values in hashes.items():
+            if all(values):
+                key = json.dumps([self.model, self.effort, sorted(values)])
+                out[course_id] = hashlib.sha256(key.encode()).hexdigest()
+        return out
+
+    def _previous_proposals(self) -> dict[int, dict[str, Any]]:
+        """Return the last report's successful course rows by id."""
+        path = self.reader.root / EXTRACTION_FILENAME
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {
+            int(row["course_id"]): row
+            for row in report.get("courses") or []
+            if row.get("proposal") and not row.get("error") and row.get("input_fingerprint")
+        }
+
     def _documents_for(
         self, course_id: int, paths: list[str]
     ) -> tuple[list[ReadableDocument], list[dict[str, Any]]]:
@@ -349,38 +404,58 @@ class FieldExtractor:
 
     # -- one course --------------------------------------------------------
 
-    def _extract_course(self, course_id: int, paths: list[str]) -> CourseExtraction:
-        """Propose and merge additions for one course."""
+    def _extract_course(
+        self,
+        course_id: int,
+        paths: list[str],
+        fingerprint: str | None = None,
+        previous: dict[str, Any] | None = None,
+    ) -> CourseExtraction:
+        """Propose and merge additions for one course.
+
+        When ``previous`` was made from the same input, its proposal is merged
+        again instead of asking the model.
+        """
         document = self.store.load(course_id)
         shortname = str((document or {}).get("general", {}).get("shortname") or course_id)
-        result = CourseExtraction(course_id=course_id, shortname=shortname)
+        result = CourseExtraction(
+            course_id=course_id, shortname=shortname, input_fingerprint=fingerprint
+        )
         if document is None:
             result.error = "no course document in the store -- run the sync first"
             return result
 
-        documents, skipped = self._documents_for(course_id, paths)
-        result.documents_read = [d.stored_path for d in documents]
-        result.documents_skipped = skipped
-        if not documents:
-            result.error = "no readable relevant documents"
-            return result
+        if fingerprint and previous and previous.get("input_fingerprint") == fingerprint:
+            proposal = previous["proposal"]
+            result.reused = True
+            result.documents_read = list(previous.get("documents_read") or [])
+            result.documents_skipped = list(previous.get("documents_skipped") or [])
+            result.extracted_at = previous.get("extracted_at")
+        else:
+            documents, skipped = self._documents_for(course_id, paths)
+            result.documents_read = [d.stored_path for d in documents]
+            result.documents_skipped = skipped
+            if not documents:
+                result.error = "no readable relevant documents"
+                return result
 
-        try:
-            proposal, usage = self._propose(document, documents)
-        except Exception as exc:
-            result.error = f"{type(exc).__name__}: {exc}"
-            return result
+            try:
+                proposal, usage = self._propose(document, documents)
+            except Exception as exc:
+                result.error = f"{type(exc).__name__}: {exc}"
+                return result
+            result.input_tokens, result.output_tokens = usage
+            result.extracted_at = int(time.time())
 
         result.proposal = proposal
         result.notes = str(proposal.get("notes") or "").strip()
-        result.input_tokens, result.output_tokens = usage
         merged, merge_report = merge_additive(
             document, proposal, min_confidence=self.min_confidence
         )
         result.document = merged
         result.merge = merge_report
         # Bookkeeping about the pass itself.
-        merged.setdefault("sync", {})["extracted_at"] = int(time.time())
+        merged.setdefault("sync", {})["extracted_at"] = result.extracted_at
         merged["sync"]["extraction_model"] = self.model
         return result
 
@@ -505,6 +580,7 @@ class FieldExtractor:
                 "rejected": rejected,
                 "conflicts": len(conflicts),
                 "errors": sum(1 for r in results if r.error),
+                "reused": sum(1 for r in results if r.reused),
                 "input_tokens": sum(r.input_tokens or 0 for r in results),
                 "output_tokens": sum(r.output_tokens or 0 for r in results),
             },

@@ -20,7 +20,7 @@ from typing import Any
 
 from flask import Blueprint, current_app, jsonify, render_template, request
 
-from ..config import ENV_API_KEY_VAR
+from ..config import ENV_API_KEY_VAR, SYNC_REBUILDS_FROM_SCRATCH
 from ..extraction.screen import load_dotenv_once, resolve_api_key, store_api_key
 from ..logs import get_logger
 from . import view_model
@@ -137,17 +137,23 @@ def post_key():
 
 @bp.post("/api/sync")
 def post_sync():
-    """Start a sync, unless one is already running."""
+    """Start a sync, unless one is already running.
+
+    ``full_rebuild`` pulls and reads everything again instead of only what
+    Moodle changed since the last sync.
+    """
     body = request.get_json(silent=True) or {}
     use_model = bool(body.get("use_model", True))
+    full_rebuild = bool(body.get("full_rebuild", SYNC_REBUILDS_FROM_SCRATCH))
     if use_model and not api_key_present():
         log.warning("POST /api/sync refused: no Anthropic API key is stored")
         return jsonify({"error": "No Anthropic API key is stored."}), 400
-    started, state = _runner().start(use_model=use_model)
+    started, state = _runner().start(use_model=use_model, full_rebuild=full_rebuild)
     log.info(
-        "POST /api/sync: %s (model stages %s)",
+        "POST /api/sync: %s (model stages %s, %s)",
         "started" if started else "refused, one is already running",
         "on" if use_model else "off",
+        "full rebuild" if full_rebuild else "new and changed only",
     )
     return jsonify({"started": started, "sync": state}), (202 if started else 409)
 
