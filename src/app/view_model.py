@@ -28,6 +28,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..config import ACTIVITY_GROUPS, DEFAULT_TIMEZONE
+from ..storage.sqlite import item_key
 
 #: Moodle activity type -> the grading-component type the design colours by.
 #: Workshops and lessons have no counterpart and fall back to "other".
@@ -184,25 +185,32 @@ def _percent(value: float) -> int:
 # ----------------------------------------------------------------------
 
 
-def activity_status(item: dict[str, Any]) -> str:
-    """Classify one activity as ``graded``, ``submitted`` or ``open``.
+def activity_status(item: dict[str, Any], marked_done: bool = False) -> str:
+    """Classify one activity as ``graded``, ``submitted``, ``done`` or ``open``.
 
     Read off the fields the sync writes, in that order of certainty: a grade
     settles it, otherwise a recorded submission does, otherwise the item is
     still the student's to do. An extracted activity has none of these fields
     and is therefore always open -- Moodle never saw it, so nothing can have
     been handed in through it.
+
+    ``done`` is the student's own word, from a manual mark. It only ever
+    replaces ``open``: when Moodle records a submission or a grade, that is
+    the better answer and the mark is moot.
     """
     if item.get("is_graded_already") or item.get("grade_achieved") is not None:
         return "graded"
     if item.get("submission_status") == "submitted":
         return "submitted"
-    return "open"
+    return "done" if marked_done else "open"
 
 
-def _activity_view(item: dict[str, Any], activity_type: str) -> dict[str, Any]:
+def _activity_view(
+    item: dict[str, Any], activity_type: str, manual: dict[str, bool]
+) -> dict[str, Any]:
     """Reshape one stored activity into what a row in the UI needs."""
-    status = activity_status(item)
+    key = item_key(item)
+    status = activity_status(item, manual.get(key, False))
     achieved, maximum = item.get("grade_achieved"), item.get("grade_max")
     return {
         "name": item.get("name") or "(unnamed)",
@@ -216,6 +224,8 @@ def _activity_view(item: dict[str, Any], activity_type: str) -> dict[str, Any]:
         "grade_max": maximum,
         "url": item.get("url"),
         "cmid": item.get("cmid"),
+        # What POST /api/courses/<id>/status takes to mark this item.
+        "key": key,
         # "extracted" means a model read this out of a document; anything the
         # Moodle API returned has no origin.
         "origin": item.get("origin") or "moodle",
@@ -230,7 +240,9 @@ def _activity_view(item: dict[str, Any], activity_type: str) -> dict[str, Any]:
     }
 
 
-def _activities(document: dict[str, Any]) -> list[dict[str, Any]]:
+def _activities(
+    document: dict[str, Any], manual: dict[str, bool]
+) -> list[dict[str, Any]]:
     """Every real activity of a course, across all four groups.
 
     A document reserves a slot per group even when a course has none, and the
@@ -242,7 +254,7 @@ def _activities(document: dict[str, Any]) -> list[dict[str, Any]]:
     for group, activity_type in ACTIVITY_GROUPS.items():
         for item in document.get(group) or []:
             if item.get("cmid") or item.get("origin"):
-                out.append(_activity_view(item, activity_type))
+                out.append(_activity_view(item, activity_type, manual))
     return out
 
 
@@ -353,11 +365,14 @@ def _component_progress(component: dict[str, Any]) -> dict[str, Any]:
     weight, because that share is not recorded anywhere: a syllabus says
     "labs 30%", never "lab 2 is 7.5% of it". Equal weight per item is the
     only split the data supports.
+
+    An item the student marked as done counts as submitted: handed in, not
+    yet graded as far as anything stored knows.
     """
     items = component["items"]
     total = len(items)
     graded = sum(1 for i in items if i["status"] == "graded")
-    submitted = sum(1 for i in items if i["status"] == "submitted")
+    submitted = sum(1 for i in items if i["status"] in ("submitted", "done"))
     return {
         "items_total": total,
         "items_graded": graded,
@@ -369,11 +384,17 @@ def _component_progress(component: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def course_view(document: dict[str, Any]) -> dict[str, Any]:
-    """Build the dashboard view of one stored course document."""
+def course_view(
+    document: dict[str, Any], manual: dict[str, bool] | None = None
+) -> dict[str, Any]:
+    """Build the dashboard view of one stored course document.
+
+    ``manual`` is the course's item key -> done marks, from
+    ``CourseStore.manual_status``.
+    """
     general = document.get("general") or {}
     components = [_component_view(entry) for entry in document.get("grading") or []]
-    activities = _activities(document)
+    activities = _activities(document, manual or {})
     unmatched = match_components(activities, components)
 
     for component in components:
@@ -488,7 +509,9 @@ def dashboard(store, *, timezone: str = DEFAULT_TIMEZONE) -> dict[str, Any]:
     documents = [
         store.load(row["course_id"]) for row in store.courses()
     ]
-    courses = [course_view(doc) for doc in documents if doc]
+    courses = [
+        course_view(doc, store.manual_status(doc["course_id"])) for doc in documents if doc
+    ]
     courses.sort(key=lambda c: c["name"])
     today = today_iso(timezone)
     synced = [c["fetched_at"] for c in courses if c["fetched_at"]]

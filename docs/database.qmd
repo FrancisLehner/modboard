@@ -92,6 +92,32 @@ the bottom of the sidebar. Before the first sync the table is empty, `account()`
 returns `None`, and all three are sent as `null` --- the greeting falls back to
 the time of day alone and the sidebar shows the course count.
 
+## Manual marks
+
+```sql
+CREATE TABLE IF NOT EXISTS manual_status (
+    course_id  INTEGER NOT NULL,
+    item_key   TEXT    NOT NULL,
+    done       INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (course_id, item_key)
+);
+```
+
+What the student said about an activity Moodle cannot know about: a hand-in
+made somewhere else, which would otherwise show as overdue forever. The course
+page writes it through `POST /api/courses/<id>/status` with
+`{"key": ..., "done": true|false}`; "not done" is stored as `done = 0` rather
+than deleted. `item_key` is `cmid:<n>` for a Moodle activity and
+`name:<name>` for an extracted one, which has no cmid.
+
+A mark only turns an `open` activity into `done`; a submission or a grade
+Moodle records wins over it. `done` counts as submitted towards a component's
+progress and the share of the grade handed in.
+
+This is the one table no sync can rebuild, so `CourseStore(fresh=True)` reads
+it out before dropping the file and writes it back after.
+
 Connections run in WAL mode with `sqlite3.Row` as the row factory.
 
 ## The activities view

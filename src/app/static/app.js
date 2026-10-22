@@ -34,7 +34,8 @@ const S = {
   syncMode: 'changed', // changed | full -- what the sync-mode screen has selected
   syncFrom: 'overview', // the screen to go back to from the sync-mode screen
   pollTimer: null,
-  openDesc: {}        // descKey -> true, for rows showing their description
+  openDesc: {},       // descKey -> true, for rows showing their description
+  openBuckets: {}     // overview column title -> true, for columns showing every card
 };
 const set = (patch) => { Object.assign(S, patch); render(); };
 
@@ -48,6 +49,24 @@ const descKey = (it) =>
 function toggleDesc(key) {
   if (S.openDesc[key]) delete S.openDesc[key]; else S.openDesc[key] = true;
   render();
+}
+function toggleBucket(title) {
+  if (S.openBuckets[title]) delete S.openBuckets[title]; else S.openBuckets[title] = true;
+  render();
+}
+
+/* Mark one activity as done or not done, for a hand-in Moodle never saw. The
+   key is encoded the same way as descKey, for the same onclick reason. The
+   answer is the whole dashboard, so the page redraws from one payload. */
+const markKey = (it) => encodeURIComponent(it.key).replace(/'/g, '%27');
+async function markDone(courseId, key, done) {
+  try {
+    const payload = await post(`/api/courses/${courseId}/status`, { key: decodeURIComponent(key), done });
+    S.data = payload;
+    set({ sync: payload.state.sync, error: '' });
+  } catch (exc) {
+    set({ error: exc.message });
+  }
 }
 
 /* ---------------- api ---------------- */
@@ -151,6 +170,7 @@ const I = {
   key: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/></svg>',
   lock: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+  tick: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
   cross: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   gear: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>'
 };
@@ -423,8 +443,8 @@ function screenOverview() {
       <div style="font-size:28px;font-weight:500;letter-spacing:-0.02em">${list.length}</div>
     </div>
     ${list.length === 0 ? '<div class="empty">Nothing due</div>' : ''}
-    ${list.slice(0, 3).map(card).join('')}
-    ${list.length > 3 ? `<div class="sub" style="text-align:center">+ ${list.length - 3} more</div>` : ''}
+    ${list.slice(0, S.openBuckets[title] ? list.length : 3).map(card).join('')}
+    ${list.length > 3 ? `<button class="more-btn" onclick="toggleBucket('${title}')" aria-expanded="${!!S.openBuckets[title]}">${S.openBuckets[title] ? 'Show less' : `+ ${list.length - 3} more`}</button>` : ''}
   </div>`;
 
   return `
@@ -492,6 +512,7 @@ function screenCourse() {
   const groups = [
     { label: 'Coming up', list: st.dated },
     { label: 'Handed in · awaiting grade', list: st.items.filter((i) => i.status === 'submitted').sort((a, b) => ms(b.due || '1970-01-01') - ms(a.due || '1970-01-01')) },
+    { label: 'Marked as done', list: st.items.filter((i) => i.status === 'done').sort((a, b) => ms(b.due || '1970-01-01') - ms(a.due || '1970-01-01')), note: 'Moodle has no record of these.' },
     { label: 'Graded', list: st.items.filter((i) => i.status === 'graded').sort((a, b) => ms(b.due || '1970-01-01') - ms(a.due || '1970-01-01')) },
     { label: 'No date yet', list: st.undated, note: 'Moodle has no deadline for these.' }
   ];
@@ -501,7 +522,10 @@ function screenCourse() {
     const u = d === null ? null : urgency(d);
     const when = fmt(it.due).split(' ');
     const key = descKey(it), shown = !!S.openDesc[key];
+    const markable = isOpen || it.status === 'done';
     return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:16px 20px;${idx ? 'border-top:1px solid var(--line);' : ''}background:${isOpen ? '#fff' : 'var(--wash-2)'}">
+      ${markable ? `<button class="mark ${isOpen ? '' : 'on'}" onclick="markDone(${c.course_id}, '${markKey(it)}', ${isOpen})"
+        title="${isOpen ? 'Mark as done' : 'Mark as not done'}" aria-label="${isOpen ? 'Mark as done' : 'Mark as not done'}" aria-pressed="${!isOpen}"><span>${I.tick}</span></button>` : ''}
       <div style="flex:0 0 86px">${it.due
         ? `<div class="sub">${when[0]}</div><div style="font-size:17px;font-weight:500">${when.slice(1).join(' ')}</div>`
         : `<div class="sub">—</div>`}</div>
@@ -514,6 +538,7 @@ function screenCourse() {
         ? `<button class="desc-btn" onclick="toggleDesc('${key}')">${shown ? 'Hide description' : 'Show description'}</button>` : ''}
       </div>
       ${isOpen ? (u ? `<span class="pill" style="background:${u.bg};color:${u.fg}">${daysLabel(d)}</span>` : '')
+        : it.status === 'done' ? `<span class="pill" style="background:var(--line);color:#3A3A36;font-weight:500">Done</span>`
         : it.status === 'submitted' ? `<span class="pill" style="background:var(--line);color:#3A3A36;font-weight:500">Awaiting grade</span>`
           : it.points ? `<span style="display:flex;align-items:baseline;white-space:nowrap;line-height:1"><span style="font-size:34px;font-weight:500;letter-spacing:-0.03em">${it.points[0]}</span><span style="font-size:18px;color:var(--muted)">&thinsp;/&thinsp;${it.points[1]}</span></span>`
             : `<span class="pill" style="background:var(--line);color:#3A3A36;font-weight:500">Graded</span>`}

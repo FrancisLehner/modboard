@@ -6,9 +6,9 @@ loading screen poll a running sync and then swap itself for the dashboard
 without a reload.
 
 Reads and writes are deliberately lopsided. Every read goes through
-``view_model.dashboard`` and touches nothing but the database. The two writes
-are the two things the design asks for -- storing the API key and starting a
-sync -- and both are POSTs, so no amount of link-following or prefetching can
+``view_model.dashboard`` and touches nothing but the database. The writes are
+storing the API key, starting a sync and marking an activity as done or not
+done, and all are POSTs, so no amount of link-following or prefetching can
 spend money or open a browser window.
 """
 
@@ -112,7 +112,7 @@ def get_course(course_id: int):
     if document is None:
         log.warning("GET /api/courses/%s: not in the database", course_id)
         return jsonify({"error": f"no course {course_id} in the database"}), 404
-    return jsonify(view_model.course_view(document))
+    return jsonify(view_model.course_view(document, _store().manual_status(course_id)))
 
 
 # -- writes ------------------------------------------------------------
@@ -133,6 +133,26 @@ def post_key():
         return jsonify({"error": f"Could not reach the credential store: {exc}"}), 500
     log.info("Anthropic API key stored in the credential store")
     return jsonify(app_state())
+
+
+@bp.post("/api/courses/<int:course_id>/status")
+def post_status(course_id: int):
+    """Mark one activity as done or not done, for what Moodle cannot see.
+
+    ``key`` is the activity's ``key`` from the dashboard payload. Returns the
+    whole dashboard again, so the page redraws from one consistent answer.
+    """
+    body = request.get_json(silent=True) or {}
+    key = str(body.get("key") or "").strip()
+    store = _store()
+    if store.load(course_id) is None:
+        log.warning("POST /api/courses/%s/status: not in the database", course_id)
+        return jsonify({"error": f"no course {course_id} in the database"}), 404
+    if not key or not isinstance(body.get("done"), bool):
+        log.warning("POST /api/courses/%s/status rejected: %r", course_id, body)
+        return jsonify({"error": "Expected a key and done: true or false."}), 400
+    store.set_manual_status(course_id, key, body["done"])
+    return get_dashboard()
 
 
 @bp.post("/api/sync")
