@@ -74,6 +74,18 @@ main{flex:999 1 640px;min-width:0}
    wrapping flex row. */
 .desc-btn{align-self:flex-start;border:0;background:transparent;padding:2px 0;font-size:13px;color:var(--muted);text-decoration:underline;text-underline-offset:2px}
 .desc-btn:hover{color:var(--ink-2)}
+/* Marking a row done by hand: a faint circle left of the date, so the date
+   keeps the row's attention. The button is a 32px hit target around a 20px
+   ring, pulled in by its negative margin so it does not widen the row. The
+   tick only shows on hover, as a preview, and when the row is marked. */
+.mark{flex:0 0 32px;height:32px;margin:0 -8px 0 -6px;padding:0;border:0;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.mark span{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line-3);display:flex;align-items:center;justify-content:center;color:var(--muted);transition:border-color .15s,background .15s}
+.mark svg{width:11px;height:11px;opacity:0;transition:opacity .15s}
+.mark:hover span{border-color:var(--ink-2)}
+.mark:hover svg{opacity:.6}
+.mark.on span{background:var(--muted);border-color:var(--muted);color:#fff}
+.mark.on svg{opacity:1}
+.mark.on:hover span{background:var(--ink-2);border-color:var(--ink-2)}
 .desc{flex:1 0 100%;margin-top:2px;padding:12px 14px;border-radius:10px;background:var(--wash);font-size:14px;line-height:1.5;color:var(--ink-2);white-space:pre-wrap}
 
 /* ---------- grade composition ---------- */

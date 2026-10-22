@@ -9,6 +9,10 @@ Beside it, ``account`` holds a single row: who the last login was, and which
 Moodle it was against. It is the one fact the course documents cannot carry,
 because they are keyed by course and the person is not a property of a course.
 
+``manual_status`` holds what the student said about an activity that Moodle
+cannot know: "I handed this in elsewhere". It is the one table no sync writes,
+so it is carried across the drop a sync starts with -- see ``CourseStore``.
+
 Within one sync, writing is an upsert and never a delete: a course that stops
 appearing keeps its old ``last_seen_at``, which distinguishes an unenrolment
 from a failed fetch. Across syncs that distinction is currently moot, because
@@ -50,6 +54,14 @@ CREATE TABLE IF NOT EXISTS account (
     full_name  TEXT    NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS manual_status (
+    course_id  INTEGER NOT NULL,
+    item_key   TEXT    NOT NULL,
+    done       INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (course_id, item_key)
+);
 """
 
 #: ``account`` column -> the ``core_webservice_get_site_info`` key it comes
@@ -73,6 +85,18 @@ _ACCOUNT_TEXT = (
 #: The database file plus the sidecars WAL mode leaves beside it. Deleting the
 #: database alone would leave a WAL that SQLite replays into the new file.
 DB_SIDECAR_SUFFIXES = ("", "-wal", "-shm")
+
+
+def item_key(item: dict[str, Any]) -> str:
+    """Identify one activity within its course, across syncs.
+
+    A Moodle activity keeps its ``cmid`` for life. An extracted one has none,
+    so its name is the only handle left; renaming it in the syllabus loses the
+    mark, which is the honest outcome for an item the model may now read
+    differently.
+    """
+    cmid = item.get("cmid")
+    return f"cmid:{int(cmid)}" if cmid else f"name:{item.get('name') or ''}"
 
 
 def drop_database(path: str | Path) -> list[Path]:
@@ -132,12 +156,24 @@ class CourseStore:
         and the sync rebuilds every document instead of updating it. It defaults
         to ``False`` because only the sync may drop the database: every later
         pass opens the same store to read and extend what the sync wrote.
+
+        Manual marks survive ``fresh``: they are read out before the drop and
+        written back after, because nothing a sync fetches could rebuild them.
         """
         self.path = str(path)
         # A first run of a packaged build starts without its data directory.
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        kept = self._read_manual_status() if fresh else []
         self.dropped = drop_database(self.path) if fresh else []
         self._init_schema()
+        if kept:
+            with self.connect() as conn:
+                conn.executemany(
+                    "INSERT INTO manual_status (course_id, item_key, done, updated_at) "
+                    "VALUES (:course_id, :item_key, :done, :updated_at)",
+                    kept,
+                )
+            log.info("kept %d manual status mark(s) across the drop", len(kept))
         if self.dropped:
             log.info(
                 "dropped %s before opening it",
@@ -158,6 +194,20 @@ class CourseStore:
         """Create the table if it does not exist."""
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+
+    def _read_manual_status(self) -> list[dict[str, Any]]:
+        """Every manual mark in the file as it stands, or none if it is absent.
+
+        Runs before the schema exists, so an older database without the table
+        is the normal case, not an error.
+        """
+        if not Path(self.path).exists():
+            return []
+        try:
+            with self.connect() as conn:
+                return [dict(r) for r in conn.execute("SELECT * FROM manual_status")]
+        except sqlite3.OperationalError:
+            return []
 
     # -- writing -----------------------------------------------------------
 
@@ -255,7 +305,39 @@ class CourseStore:
         )
         return row
 
+    def set_manual_status(self, course_id: int, key: str, done: bool) -> None:
+        """Record that the student marked one activity as done or not done.
+
+        "Not done" is stored rather than deleted, so the table keeps the last
+        thing the student said about every item they touched.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_status (course_id, item_key, done, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(course_id, item_key) DO UPDATE SET
+                    done       = excluded.done,
+                    updated_at = excluded.updated_at
+                """,
+                (int(course_id), key, int(bool(done)), int(time.time())),
+            )
+        log.info(
+            "course %s, %s marked as %s", course_id, key, "done" if done else "not done"
+        )
+
     # -- reading -----------------------------------------------------------
+
+    def manual_status(self, course_id: int) -> dict[str, bool]:
+        """Return item key -> done for every mark in one course."""
+        with self.connect() as conn:
+            return {
+                r["item_key"]: bool(r["done"])
+                for r in conn.execute(
+                    "SELECT item_key, done FROM manual_status WHERE course_id = ?",
+                    (int(course_id),),
+                )
+            }
 
     def account(self) -> dict[str, Any] | None:
         """Return the stored identity, or ``None`` before the first login."""
