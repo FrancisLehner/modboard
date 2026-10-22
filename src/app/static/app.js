@@ -177,7 +177,7 @@ function screenApiKey() {
     <div class="steps"><span class="on"></span><span></span></div>
     <div style="display:flex;flex-direction:column;gap:10px">
       <h1 style="margin:0;font-size:34px;font-weight:500;letter-spacing:-0.025em;line-height:1.1">Add your Anthropic API key</h1>
-      <p style="margin:0;font-size:16px;color:var(--ink-2);line-height:1.5">Modboard uses Claude to read your course documents and pull out how each grade is built and which sessions you have to attend in person.</p>
+      <p style="margin:0;font-size:16px;color:var(--ink-2);line-height:1.5">Modboard uses Claude to read your course documents and pull out data that could not be retrieved from relational data.</p>
     </div>
     <div style="display:flex;flex-direction:column;gap:10px">
       <label for="key" style="font-size:14px;font-weight:500">API key</label>
@@ -186,6 +186,7 @@ function screenApiKey() {
         onkeydown="if(event.key==='Enter'&&/^sk-ant-[\\w-]{10,}$/.test(this.value.trim()))saveKey()"></div>
       <div id="kerr" style="font-size:13px;color:#B42318;visibility:${message ? 'visible' : 'hidden'}">${message || '&nbsp;'}</div>
       <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)">${I.lock} Stored in your macOS Keychain. Never leaves this machine except to call Anthropic.</div>
+      <div style="font-size:13px;color:var(--muted)">Attention: you need to have credits for the API key.</div>
     </div>
     <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px">
       <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" style="font-size:14px;display:flex;align-items:center;gap:6px">Get a key in the Console ${I.ext}</a>
@@ -267,7 +268,7 @@ function screenPulling() {
         <button class="btn-primary" onclick="startSync()">${I.sync} Try again</button>
         ${courses().length ? `<button class="btn-ghost" onclick="set({screen:'overview'})">Open the dashboard anyway</button>` : ''}
       </div>`
-      : `<p style="margin:0;font-size:13px;color:var(--muted)">The first step may open a browser window to sign you in to Moodle. You can leave this page — the job keeps running and the dashboard fills in when it is done.</p>`}
+      : ''}
   </div></div>`;
 }
 
