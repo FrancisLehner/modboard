@@ -74,6 +74,11 @@ main{flex:999 1 640px;min-width:0}
    wrapping flex row. */
 .desc-btn{align-self:flex-start;border:0;background:transparent;padding:2px 0;font-size:13px;color:var(--muted);text-decoration:underline;text-underline-offset:2px}
 .desc-btn:hover{color:var(--ink-2)}
+/* Expands an overview column past its first three cards, and folds it back.
+   Styled like the line of text it replaced, so a column reads the same until
+   it is clicked. */
+.more-btn{align-self:center;border:0;background:transparent;padding:6px 10px;font-size:13px;color:var(--muted);cursor:pointer}
+.more-btn:hover{color:var(--ink-2);text-decoration:underline;text-underline-offset:2px}
 /* Marking a row done by hand: a faint circle left of the date, so the date
    keeps the row's attention. The button is a 32px hit target around a 20px
    ring, pulled in by its negative margin so it does not widen the row. The

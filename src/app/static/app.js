@@ -34,7 +34,8 @@ const S = {
   syncMode: 'changed', // changed | full -- what the sync-mode screen has selected
   syncFrom: 'overview', // the screen to go back to from the sync-mode screen
   pollTimer: null,
-  openDesc: {}        // descKey -> true, for rows showing their description
+  openDesc: {},       // descKey -> true, for rows showing their description
+  openBuckets: {}     // overview column title -> true, for columns showing every card
 };
 const set = (patch) => { Object.assign(S, patch); render(); };
 
@@ -47,6 +48,10 @@ const descKey = (it) =>
   encodeURIComponent(it.cmid || `${it.name}|${it.due || ''}`).replace(/'/g, '%27');
 function toggleDesc(key) {
   if (S.openDesc[key]) delete S.openDesc[key]; else S.openDesc[key] = true;
+  render();
+}
+function toggleBucket(title) {
+  if (S.openBuckets[title]) delete S.openBuckets[title]; else S.openBuckets[title] = true;
   render();
 }
 
@@ -438,8 +443,8 @@ function screenOverview() {
       <div style="font-size:28px;font-weight:500;letter-spacing:-0.02em">${list.length}</div>
     </div>
     ${list.length === 0 ? '<div class="empty">Nothing due</div>' : ''}
-    ${list.slice(0, 3).map(card).join('')}
-    ${list.length > 3 ? `<div class="sub" style="text-align:center">+ ${list.length - 3} more</div>` : ''}
+    ${list.slice(0, S.openBuckets[title] ? list.length : 3).map(card).join('')}
+    ${list.length > 3 ? `<button class="more-btn" onclick="toggleBucket('${title}')" aria-expanded="${!!S.openBuckets[title]}">${S.openBuckets[title] ? 'Show less' : `+ ${list.length - 3} more`}</button>` : ''}
   </div>`;
 
   return `
