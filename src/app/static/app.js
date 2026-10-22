@@ -24,7 +24,7 @@ const TYPES = {
 
 /* ---------------- state ---------------- */
 const S = {
-  screen: 'loading',   // loading | apikey | start | syncmode | pulling | overview | course
+  screen: 'loading',   // loading | apikey | start | syncmode | settings | signedout | pulling | overview | course
   courseId: null,
   apiKey: '',
   keyError: '',
@@ -33,6 +33,7 @@ const S = {
   error: '',
   syncMode: 'changed', // changed | full -- what the sync-mode screen has selected
   syncFrom: 'overview', // the screen to go back to from the sync-mode screen
+  settingsFrom: 'overview', // the screen to go back to from the settings menu
   pollTimer: null,
   openDesc: {},       // descKey -> true, for rows showing their description
   openBuckets: {}     // overview column title -> true, for columns showing every card
@@ -172,6 +173,8 @@ const I = {
   check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
   tick: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
   cross: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  logout: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 17l-5-5 5-5M5 12h11"/></svg>',
+  chevron: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
   gear: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>'
 };
 const brand = (size) => `<div class="brand"><div class="brand-mark">${I.logo}</div><div class="brand-name" style="${size ? 'font-size:' + size + 'px' : ''}">Modboard</div></div>`;
@@ -181,8 +184,10 @@ const KEY_RE = /^sk-ant-[\w-]{10,}$/;
 
 async function saveKey() {
   try {
-    await post('/api/key', { api_key: S.apiKey.trim() });
-    set({ keyError: '', screen: 'start' });
+    const state = await post('/api/key', { api_key: S.apiKey.trim() });
+    // The server picks: a first run goes on to get started, a changed key
+    // goes back to the dashboard.
+    set({ keyError: '', apiKey: '', screen: state.screen });
   } catch (exc) {
     set({ keyError: exc.message });
   }
@@ -193,7 +198,7 @@ function screenApiKey() {
   const typed = S.apiKey.length > 0;
   const message = S.keyError || (typed && !S.apiKey.startsWith('sk-ant-') ? 'Keys start with <span class="mono">sk-ant-</span>' : '');
   const back = S.data && S.data.courses.length
-    ? `<button class="btn-ghost" onclick="set({screen:'overview',keyError:''})">${I.back} Back</button>` : '';
+    ? `<button class="btn-ghost" onclick="set({screen:'settings',keyError:''})">${I.back} Back</button>` : '';
   return `<div class="onb"><div class="onb-card">
     <div style="display:flex;justify-content:space-between;align-items:center">${brand()}<span class="sub">Step 1 of 2</span></div>
     <div class="steps"><span class="on"></span><span></span></div>
@@ -269,6 +274,65 @@ function screenSyncMode() {
   </div></div>`;
 }
 
+/* ---- settings: what the gear opens ---- */
+function openSettings() {
+  set({ screen: 'settings', settingsFrom: S.screen === 'course' ? 'course' : 'overview', error: '' });
+}
+
+async function logout() {
+  try {
+    const state = await post('/api/logout');
+    set({ error: '', screen: state.screen });
+  } catch (exc) {
+    set({ error: exc.message });
+  }
+}
+
+function screenSettings() {
+  const running = !!(S.sync && S.sync.running);
+  const item = (icon, title, text, action, disabled) => `
+    <button class="choice menu" onclick="${action}" ${disabled ? 'disabled' : ''}>
+      <span class="menu-ic">${icon}</span>
+      <span style="flex:1;display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:16px;font-weight:500">${title}</span>
+        <span style="font-size:14px;color:var(--ink-2);line-height:1.45">${text}</span>
+      </span>
+      <span class="menu-go">${I.chevron}</span></button>`;
+  return `<div class="onb"><div class="onb-card">
+    <div style="display:flex;justify-content:space-between;align-items:center">${brand()}<span class="sub">Settings</span></div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <h1 style="margin:0;font-size:34px;font-weight:500;letter-spacing:-0.025em;line-height:1.1">Settings</h1>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${item(I.key, 'Change Anthropic API key',
+        'Replace the key Modboard uses to read your course documents.',
+        "set({screen:'apikey',apiKey:'',keyError:''})")}
+      ${item(I.logout, 'Log out of Moodle',
+        running ? 'Wait for the sync to finish first.'
+          : 'Deletes your Moodle token from the Keychain. You sign in again on the next sync.',
+        'logout()', running)}
+    </div>
+    ${S.error ? `<div class="alert">${esc(S.error)}</div>` : ''}
+    <div style="display:flex;justify-content:flex-end">
+      <button class="btn-ghost" onclick="set({screen:S.settingsFrom,error:''})">${I.back} Back</button>
+    </div>
+  </div></div>`;
+}
+
+/* After a logout, until the next sign-in. Signing in is a sync: its first
+   stage opens the browser when no token is stored. */
+function screenSignedOut() {
+  return `<div class="onb"><div class="onb-card">
+    <div style="display:flex;justify-content:space-between;align-items:center">${brand()}<span class="sub">Signed out</span></div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <h1 style="margin:0;font-size:34px;font-weight:500;letter-spacing:-0.025em;line-height:1.1">You are logged out of Moodle</h1>
+      <p style="margin:0;font-size:16px;color:var(--ink-2);line-height:1.5">Sign in again to see your courses. A browser window opens for the Moodle login, then Modboard syncs what changed.</p>
+    </div>
+    ${S.error ? `<div class="alert">${esc(S.error)}</div>` : ''}
+    <button class="btn-primary" style="width:100%;min-height:58px;font-size:18px" onclick="set({syncMode:'changed'});startSync()">Sign in to Moodle ${I.arrow}</button>
+  </div></div>`;
+}
+
 /* ---- the sync, as the backend reports it ---- */
 async function startSync() {
   try {
@@ -276,7 +340,7 @@ async function startSync() {
     set({ sync: body.sync, error: '', screen: 'pulling' });
     poll();
   } catch (exc) {
-    set({ error: exc.message, screen: courses().length ? 'overview' : 'start' });
+    set({ error: exc.message, screen: S.screen === 'signedout' ? 'signedout' : courses().length ? 'overview' : 'start' });
   }
 }
 
@@ -354,7 +418,7 @@ function sidebar() {
             <div class="one-line" style="font-size:13px;color:var(--muted)" title="${esc(user.organisation || '')}">${esc(user.organisation || '')}</div>
           </div>`
       : `<div style="flex:1;font-size:13px;color:var(--muted)">${plural(courses().length, 'course')} in the database</div>`}
-        <button aria-label="Settings" onclick="set({screen:'apikey',apiKey:'',keyError:''})" style="width:44px;height:44px;border:0;background:transparent;display:flex;align-items:center;justify-content:center">${I.gear}</button>
+        <button aria-label="Settings" onclick="openSettings()" style="width:44px;height:44px;border:0;background:transparent;display:flex;align-items:center;justify-content:center">${I.gear}</button>
       </div>
     </div>
   </nav>`;
@@ -674,6 +738,8 @@ function render() {
   else if (sc === 'apikey') html = screenApiKey();
   else if (sc === 'start') html = screenStart();
   else if (sc === 'syncmode') html = screenSyncMode();
+  else if (sc === 'settings') html = screenSettings();
+  else if (sc === 'signedout') html = screenSignedOut();
   else if (sc === 'pulling') html = screenPulling();
   else html = `<div class="shell">${sidebar()}<main>${sc === 'course' ? screenCourse() : screenOverview()}</main></div>`;
 

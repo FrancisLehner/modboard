@@ -7,8 +7,8 @@ without a reload.
 
 Reads and writes are deliberately lopsided. Every read goes through
 ``view_model.dashboard`` and touches nothing but the database. The writes are
-storing the API key, starting a sync and marking an activity as done or not
-done, and all are POSTs, so no amount of link-following or prefetching can
+storing the API key, starting a sync, marking an activity as done or not done
+and logging out, and all are POSTs, so no amount of link-following or prefetching can
 spend money or open a browser window.
 """
 
@@ -21,6 +21,7 @@ from typing import Any
 from flask import Blueprint, current_app, jsonify, render_template, request
 
 from ..config import ENV_API_KEY_VAR, SYNC_REBUILDS_FROM_SCRATCH
+from ..data_retention.session import MoodleSession
 from ..extraction.screen import load_dotenv_once, resolve_api_key, store_api_key
 from ..logs import get_logger
 from . import view_model
@@ -45,6 +46,29 @@ def api_key_present() -> bool:
     return bool(os.environ.get(ENV_API_KEY_VAR) or resolve_api_key())
 
 
+def _moodle_session() -> MoodleSession:
+    """A session on the sync's site, for its token store and nothing else.
+
+    Building one makes no request: the authenticator only talks to Moodle when
+    a login starts.
+    """
+    return MoodleSession(_runner().site, on_message=lambda message: None)
+
+
+def moodle_signed_in() -> bool:
+    """Whether a Moodle token is stored for the sync's site.
+
+    Not whether it still works -- that costs a request, and the sync finds out
+    anyway. A missing token is what a logout leaves behind.
+    """
+    session = _moodle_session()
+    try:
+        return bool(session.store.load(session.site_url))
+    except Exception:
+        log.exception("could not read the Moodle token store")
+        return False
+
+
 def _store():
     """The ``CourseStore`` this app was built with."""
     return current_app.extensions["modboard"]["store"]
@@ -59,20 +83,28 @@ def app_state() -> dict[str, Any]:
     """Which screen the frontend should open on, and why.
 
     ``onboarding`` is the one decision the server makes about screens: no key
-    means the key screen, no courses means the get-started screen, and anything
+    means the key screen, no courses means the get-started screen, no Moodle
+    token beside existing courses means the signed-out screen, and anything
     else means the dashboard. The frontend may navigate away from it afterwards.
+
+    A first run has no token either, but its get-started screen already signs
+    in, so it does not need a second screen saying so.
     """
     runner = _runner()
     courses = _store().courses()
     has_key = api_key_present()
+    signed_in = moodle_signed_in()
     if not has_key:
         screen = "apikey"
     elif not courses:
         screen = "start"
+    elif not signed_in and not runner.state()["running"]:
+        screen = "signedout"
     else:
         screen = "overview"
     return {
         "has_api_key": has_key,
+        "signed_in": signed_in,
         "course_count": len(courses),
         "screen": screen,
         "sync": runner.state(),
@@ -153,6 +185,22 @@ def post_status(course_id: int):
         return jsonify({"error": "Expected a key and done: true or false."}), 400
     store.set_manual_status(course_id, key, body["done"])
     return get_dashboard()
+
+
+@bp.post("/api/logout")
+def post_logout():
+    """Delete the stored Moodle token, so the next sync has to sign in again.
+
+    The course database is left alone: it is what the student already pulled,
+    and signing in again refreshes it rather than starting over. Refused while
+    a sync runs, which holds the token and would store it again on the way.
+    """
+    if _runner().state()["running"]:
+        log.warning("POST /api/logout refused: a sync is running")
+        return jsonify({"error": "Wait for the sync to finish before logging out."}), 409
+    removed = _moodle_session().logout()
+    log.info("POST /api/logout: %s", ", ".join(removed) or "nothing was stored")
+    return jsonify(app_state())
 
 
 @bp.post("/api/sync")
