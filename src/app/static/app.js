@@ -24,13 +24,15 @@ const TYPES = {
 
 /* ---------------- state ---------------- */
 const S = {
-  screen: 'loading',   // loading | apikey | start | pulling | overview | course
+  screen: 'loading',   // loading | apikey | start | syncmode | pulling | overview | course
   courseId: null,
   apiKey: '',
   keyError: '',
   data: null,          // GET /api/dashboard
   sync: null,          // GET /api/sync
   error: '',
+  syncMode: 'changed', // changed | full -- what the sync-mode screen has selected
+  syncFrom: 'overview', // the screen to go back to from the sync-mode screen
   pollTimer: null,
   openDesc: {}        // descKey -> true, for rows showing their description
 };
@@ -215,10 +217,42 @@ function screenStart() {
   </div></div>`;
 }
 
+/* ---- choosing how much to pull ---- */
+function askSync() {
+  set({ screen: 'syncmode', syncFrom: S.screen === 'course' ? 'course' : 'overview' });
+}
+
+function screenSyncMode() {
+  const option = (mode, title, text) => `
+    <button class="choice ${S.syncMode === mode ? 'on' : ''}" onclick="set({syncMode:'${mode}'})" aria-pressed="${S.syncMode === mode}">
+      <span class="radio"></span>
+      <span style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:16px;font-weight:500">${title}</span>
+        <span style="font-size:14px;color:var(--ink-2);line-height:1.45">${text}</span>
+      </span></button>`;
+  return `<div class="onb"><div class="onb-card">
+    <div style="display:flex;justify-content:space-between;align-items:center">${brand()}<span class="sub">Sync</span></div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <h1 style="margin:0;font-size:34px;font-weight:500;letter-spacing:-0.025em;line-height:1.1">What should this sync pull?</h1>
+      <p style="margin:0;font-size:16px;color:var(--ink-2);line-height:1.5">Courses and assignments are always refreshed.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${option('changed', 'Only new and changed',
+        'You want to see what changed since the last sync.')}
+      ${option('full', 'Full rebuild',
+        'You want Modboard to fetch everything from zero and rebuild.')}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:10px">
+      <button class="btn-ghost" onclick="set({screen:S.syncFrom})">${I.back} Back</button>
+      <button class="btn-primary" onclick="startSync()">${I.sync} Start sync</button>
+    </div>
+  </div></div>`;
+}
+
 /* ---- the sync, as the backend reports it ---- */
 async function startSync() {
   try {
-    const body = await post('/api/sync', {});
+    const body = await post('/api/sync', { full_rebuild: S.syncMode === 'full' });
     set({ sync: body.sync, error: '', screen: 'pulling' });
     poll();
   } catch (exc) {
@@ -290,7 +324,7 @@ function sidebar() {
     </div>
     <div style="margin-top:auto;display:flex;flex-direction:column;gap:18px">
       ${S.error ? `<div class="alert" style="font-size:13px">${esc(S.error)}</div>` : ''}
-      <button onclick="startSync()" ${running ? 'disabled' : ''} style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);border:0;background:transparent;padding:0;text-align:left;cursor:${running ? 'default' : 'pointer'}">
+      <button onclick="askSync()" ${running ? 'disabled' : ''} style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);border:0;background:transparent;padding:0;text-align:left;cursor:${running ? 'default' : 'pointer'}">
         <span style="width:8px;height:8px;border-radius:4px;background:${running ? '#B9873A' : '#3F8A3A'};flex:none"></span>
         <span style="flex:1">${running ? 'Syncing…' : 'Synced · ' + ago(S.data && S.data.synced_at)}</span>${I.sync}</button>
       <div style="display:flex;align-items:center;gap:12px">
@@ -400,7 +434,7 @@ function screenOverview() {
         <div class="sub" style="font-size:14px">${fmt(today())}${term.week ? ' · Week ' + term.week + ' of ' + term.weeks : ''}</div>
         <h1 style="margin:6px 0 0;font-size:40px;font-weight:500;letter-spacing:-0.025em">${greeting()}</h1>
       </div>
-      <button class="btn-ghost" onclick="startSync()">${I.sync} Sync</button>
+      <button class="btn-ghost" onclick="askSync()">${I.sync} Sync</button>
     </div>
     <div class="stats">
       <div class="stat"><div class="num">${dueWeek}</div><div class="lbl">Due in the<br>next 7 days</div></div>
@@ -614,6 +648,7 @@ function render() {
   if (sc === 'loading') html = screenLoading();
   else if (sc === 'apikey') html = screenApiKey();
   else if (sc === 'start') html = screenStart();
+  else if (sc === 'syncmode') html = screenSyncMode();
   else if (sc === 'pulling') html = screenPulling();
   else html = `<div class="shell">${sidebar()}<main>${sc === 'course' ? screenCourse() : screenOverview()}</main></div>`;
 

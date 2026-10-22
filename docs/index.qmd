@@ -106,10 +106,17 @@ uv run python pipeline_test.py          # all of the above, end to end
 uv run python pipeline_test.py --skip-llm   # stages 1-3 only, spends nothing
 ```
 
-Every run **rebuilds**: the database is dropped and the corpus cleared before
-they are rewritten, so what lands on disk is what Moodle holds now rather than
-an accumulation of past runs. `--reuse` keeps both. The switch is
-`SYNC_REBUILDS_FROM_SCRATCH` in `src/config.py`.
+The database is rebuilt on every run, since the structured sync is a handful
+of calls. The corpus is **updated in place**: a file is downloaded only when
+Moodle reports a new `timemodified` or size, a text is rewritten only when its
+content changed, and whatever a course no longer lists is deleted, so what is
+on disk is still what Moodle holds now. Passes 1 and 2 then reuse their
+results for content whose `sha256` is unchanged, so an unchanged course costs
+no tokens. The dashboard's Sync button asks each time whether to pull only
+what changed or do a full rebuild, which clears the corpus and its screening
+and extraction reports and pulls and reads everything again
+(`POST /api/sync` with `{"full_rebuild": true}`). `SYNC_REBUILDS_FROM_SCRATCH`
+in `src/config.py` is the default when a request does not say.
 
 Outputs, all in the project directory and all gitignored:
 

@@ -172,7 +172,7 @@ because the stage no longer talks into a void.
 ```python
 # src/app/jobs.py
 harvester = UnstructuredHarvester(
-    session, root=DEFAULT_CORPUS_ROOT, fresh=True,
+    session, root=DEFAULT_CORPUS_ROOT,
     on_message=message_sink("sync.harvest"),
 )
 ```

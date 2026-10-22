@@ -129,6 +129,11 @@ main{flex:999 1 640px;min-width:0}
 .steps{display:flex;gap:6px}
 .steps span{height:4px;flex:1;border-radius:2px;background:var(--line)}
 .steps span.on{background:var(--ink-solid)}
+/* the sync-mode choice: two options, one selected, the radio drawn by hand */
+.choice{display:flex;align-items:flex-start;gap:14px;width:100%;padding:16px 18px;border:1px solid var(--line-3);border-radius:12px;background:#fff;text-align:left}
+.choice.on{border-color:var(--ink-solid);box-shadow:0 0 0 3px rgba(22,22,22,.08)}
+.choice .radio{width:18px;height:18px;border-radius:9px;border:1.5px solid var(--line-3);flex:none;margin-top:2px}
+.choice.on .radio{border:5px solid var(--ink-solid)}
 .job-row{display:flex;align-items:center;gap:14px;padding:14px 0;border-top:1px solid var(--line)}
 .job-ic{width:26px;height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;flex:none}
 @keyframes spin{to{transform:rotate(360deg)}}

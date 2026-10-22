@@ -24,7 +24,12 @@ import threading
 import time
 from typing import Any, Callable
 
-from ..config import DEFAULT_CORPUS_ROOT, DEFAULT_DB_PATH, DEFAULT_SITE
+from ..config import (
+    DEFAULT_CORPUS_ROOT,
+    DEFAULT_DB_PATH,
+    DEFAULT_SITE,
+    SYNC_REBUILDS_FROM_SCRATCH,
+)
 from ..data_retention.corpus import UnstructuredHarvester
 from ..data_retention.document import CourseDocumentBuilder
 from ..data_retention.session import MoodleSession
@@ -58,11 +63,24 @@ class SyncJob:
     state a poll reads is always the state of the latest run.
     """
 
-    def __init__(self, *, site: str, db: str, use_model: bool = True) -> None:
-        """Set up the stage list for a run against ``site``, writing ``db``."""
+    def __init__(
+        self,
+        *,
+        site: str,
+        db: str,
+        use_model: bool = True,
+        full_rebuild: bool = SYNC_REBUILDS_FROM_SCRATCH,
+    ) -> None:
+        """Set up the stage list for a run against ``site``, writing ``db``.
+
+        ``full_rebuild`` clears the corpus and the screening and extraction
+        reports first, so every file is downloaded and every document read by
+        the model again. Otherwise only what Moodle changed is.
+        """
         self.site = site
         self.db = db
         self.use_model = use_model
+        self.full_rebuild = full_rebuild
         self.started_at = time.time()
         self.finished_at: float | None = None
         self.error: str | None = None
@@ -132,6 +150,7 @@ class SyncJob:
             "finished_at": self.finished_at,
             "elapsed": round((self.finished_at or time.time()) - self.started_at, 1),
             "used_model": self.use_model,
+            "full_rebuild": self.full_rebuild,
         }
 
     # -- the run -----------------------------------------------------------
@@ -139,10 +158,11 @@ class SyncJob:
     def run(self) -> None:
         """Run every stage in order, stopping at the first failure."""
         log.info(
-            "sync started: site %s, database %s, model stages %s",
+            "sync started: site %s, database %s, model stages %s, %s",
             self.site,
             self.db,
             "on" if self.use_model else "off",
+            "full rebuild" if self.full_rebuild else "new and changed only",
         )
         try:
             session = self._login()
@@ -204,13 +224,17 @@ class SyncJob:
         return store
 
     def _harvest(self, session: MoodleSession):
-        """Stage 3: pull every prose page and file into the corpus directory."""
+        """Stage 3: pull new and changed prose pages and files into the corpus.
+
+        What Moodle reports unchanged since the last sync is kept, not fetched
+        again, unless this run is a full rebuild.
+        """
         self.begin("harvest")
         try:
             harvester = UnstructuredHarvester(
                 session,
                 root=DEFAULT_CORPUS_ROOT,
-                fresh=True,
+                fresh=self.full_rebuild,
                 on_message=message_sink("sync.harvest"),
             )
             manifest = harvester.harvest_all()
@@ -221,7 +245,8 @@ class SyncJob:
         totals = manifest["totals"]
         self.finish(
             "harvest",
-            f"{totals['files_downloaded']} files · {totals['texts']} text items",
+            f"{totals['files_downloaded']} files · {totals['texts']} text items · "
+            f"{totals['new'] + totals['modified']} new or changed",
         )
         return harvester.root
 
@@ -241,7 +266,10 @@ class SyncJob:
             self.fail("screen", str(totals["aborted"]))
             return False
         log.info("screening totals: %s", totals)
-        self.finish("screen", f"{totals['relevant']} relevant")
+        self.finish(
+            "screen",
+            f"{totals['relevant']} relevant · {totals['reused']} unchanged, not re-screened",
+        )
         return True
 
     def _extract(self, reader: CorpusReader, store: CourseStore) -> bool:
@@ -259,7 +287,8 @@ class SyncJob:
         log.info("extraction totals: %s", totals)
         self.finish(
             "extract",
-            f"{totals['courses']} courses · {totals['applied']} additions",
+            f"{totals['courses']} courses · {totals['applied']} additions · "
+            f"{totals['reused']} reused",
         )
         return True
 
@@ -299,13 +328,17 @@ class SyncRunner:
         """Whether a job is still running."""
         return self._job is not None and self._job.finished_at is None
 
-    def start(self, *, use_model: bool = True) -> tuple[bool, dict[str, Any]]:
+    def start(
+        self, *, use_model: bool = True, full_rebuild: bool = SYNC_REBUILDS_FROM_SCRATCH
+    ) -> tuple[bool, dict[str, Any]]:
         """Start a job unless one is running. Returns ``(started, state)``."""
         with self._lock:
             if self.busy():
                 log.warning("sync refused: one is already running")
                 return False, self.state()
-            job = SyncJob(site=self.site, db=self.db, use_model=use_model)
+            job = SyncJob(
+                site=self.site, db=self.db, use_model=use_model, full_rebuild=full_rebuild
+            )
             self._job = job
         self._spawn(job.run)
         return True, job.state()
@@ -326,5 +359,6 @@ class SyncRunner:
                 "finished_at": None,
                 "elapsed": 0,
                 "used_model": True,
+                "full_rebuild": SYNC_REBUILDS_FROM_SCRATCH,
             }
         return self._job.state()
