@@ -72,7 +72,8 @@ Two macOS details while testing a local build:
 - **Keychain prompts.** Secrets saved while running from source belong to
   Python, so the build asks before reading them. Each rebuild is a new,
   ad-hoc-signed program, and "Always Allow" does not carry over. Run from
-  source while developing.
+  source while developing. `src/keychain.py` caches every entry for the
+  life of the process, so a running app asks at most once per secret.
 - **No Gatekeeper warning.** A local build is not marked as downloaded. To see
   what users see, download the zip from a workflow run.
 

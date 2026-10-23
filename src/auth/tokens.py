@@ -1,7 +1,8 @@
 """Token persistence.
 
 The web-service token is a bearer credential for the whole account, so the
-default store is the OS credential store via ``keyring``. ``MemoryTokenStore``
+default store is the OS credential store via ``keyring``, read through
+``src.keychain`` so each entry is fetched once per process. ``MemoryTokenStore``
 is the opt-out for throwaway work.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .. import keychain
 from ..config import KEYRING_SERVICE_PRIVATE_TOKEN, KEYRING_SERVICE_TOKEN
 from .flow import TokenMask
 
@@ -57,43 +59,28 @@ class TokenStore:
             return False
         return not isinstance(keyring.get_keyring(), FailKeyring)
 
-    @staticmethod
-    def _keyring():
-        """Import ``keyring`` lazily; raise if it is unavailable."""
-        try:
-            import keyring
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise RuntimeError(
-                "keyring is not installed, so the token cannot be stored "
-                "securely. Install it, or pass store=MemoryTokenStore()."
-            ) from exc
-        return keyring
-
     def load(self, site_url: str) -> str | None:
         """Return the stored token for ``site_url``, or ``None``."""
-        return self._keyring().get_password(self.service, site_url)
+        return keychain.get_password(self.service, site_url)
 
     def load_private(self, site_url: str) -> str | None:
         """Return the stored private token for ``site_url``, or ``None``."""
-        return self._keyring().get_password(self.private_service, site_url)
+        return keychain.get_password(self.private_service, site_url)
 
     def save(self, site_url: str, token: str, private_token: str | None) -> None:
         """Store the token, and the private token when given."""
-        keyring = self._keyring()
-        keyring.set_password(self.service, site_url, token)
+        keychain.set_password(self.service, site_url, token)
         if private_token:
-            keyring.set_password(self.private_service, site_url, private_token)
+            keychain.set_password(self.private_service, site_url, private_token)
 
     def delete(self, site_url: str) -> list[str]:
         """Delete both entries; return the names that existed."""
-        keyring = self._keyring()
         removed: list[str] = []
         for service, label in (
             (self.service, "token"),
             (self.private_service, "private token"),
         ):
-            if keyring.get_password(service, site_url) is not None:
-                keyring.delete_password(service, site_url)
+            if keychain.delete_password(service, site_url):
                 removed.append(label)
         return removed
 

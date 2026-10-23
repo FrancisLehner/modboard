@@ -29,6 +29,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
+from .. import keychain
 from ..config import (
     ENV_API_KEY_VAR,
     ENV_FILE,
@@ -108,18 +109,14 @@ def resolve_api_key() -> str | None:
     if os.environ.get(ENV_API_KEY_VAR):
         return None
     try:
-        import keyring
-
-        return keyring.get_password(KEYRING_SERVICE_ANTHROPIC, KEYRING_USER_ANTHROPIC) or None
+        return keychain.get_password(KEYRING_SERVICE_ANTHROPIC, KEYRING_USER_ANTHROPIC) or None
     except Exception:
         return None
 
 
 def store_api_key(api_key: str) -> None:
     """Store the API key in the OS credential store."""
-    import keyring
-
-    keyring.set_password(KEYRING_SERVICE_ANTHROPIC, KEYRING_USER_ANTHROPIC, api_key.strip())
+    keychain.set_password(KEYRING_SERVICE_ANTHROPIC, KEYRING_USER_ANTHROPIC, api_key.strip())
 
 
 # ----------------------------------------------------------------------
