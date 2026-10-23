@@ -5,6 +5,8 @@
 # PyInstaller does not cross-compile; each OS builds its own, see
 # .github/workflows/release.yml.
 
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 a = Analysis(
@@ -33,5 +35,8 @@ exe = EXE(
     # The console window is the app's only chrome: it shows the address and
     # closing it stops the server.
     console=True,
+    # Windows shows this on the .exe. macOS only shows icons on a .app
+    # bundle, so a bare executable ignores it.
+    icon="assets/modboard.icns" if sys.platform == "darwin" else "assets/modboard.ico",
     upx=False,
 )

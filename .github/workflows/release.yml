@@ -36,11 +36,19 @@ jobs:
 
       - run: uv run pyinstaller modboard.spec --noconfirm
 
+      # macOS ignores the spec's icon on a bare executable, but Finder shows a
+      # custom icon stored in the file's resource fork.
+      - name: Icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          osascript -l JavaScript -e 'ObjC.import("AppKit"); const img = $.NSImage.alloc.initWithContentsOfFile("assets/modboard.icns"); if (!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(img, "dist/modboard", 0)) throw "icon not set"'
+
       # A zip keeps the executable bit on macOS; the browser download would
-      # drop it from a bare binary.
+      # drop it from a bare binary. ditto also keeps the resource fork that
+      # holds the icon, which zip drops.
       - name: Zip (macOS)
         if: runner.os == 'macOS'
-        run: cd dist && zip ../${{ matrix.asset }}.zip modboard
+        run: cd dist && ditto -c -k --sequesterRsrc modboard ../${{ matrix.asset }}.zip
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path dist/modboard.exe -DestinationPath ${{ matrix.asset }}.zip
