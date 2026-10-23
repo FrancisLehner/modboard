@@ -24,8 +24,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from ..config import ACTIVITY_GROUPS, DEFAULT_DB_PATH
 from ..logs import get_logger
@@ -183,12 +184,18 @@ class CourseStore:
 
     # -- connection --------------------------------------------------------
 
-    def connect(self) -> sqlite3.Connection:
-        """Return a row-factory connection in WAL mode."""
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        """Commit or roll back a WAL connection, then always close it."""
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            # SQLite's context manager handles transactions, but does not close.
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         """Create the table if it does not exist."""
